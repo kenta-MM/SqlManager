@@ -25,7 +25,7 @@ class SqlManager:
                 接続情報
         """
         self.__default_setting = {
-            'user': settings['root'],
+            'user': settings['user'],
             'passwd': settings['passwd'],
             'host': settings['host'],
             'db': settings['db']
