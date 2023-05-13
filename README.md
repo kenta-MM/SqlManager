@@ -1,0 +1,2 @@
+# SqlManager
+sqlを使いやすくしたもの
