@@ -33,6 +33,7 @@ class SqlManager:
         self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
+        self.__holder_value_list = []
         self.__select = []
         self.__insert_or_update_list = []
         self.__order_by_list = []
@@ -45,6 +46,7 @@ class SqlManager:
         del self.__table
         del self.__where_list
         del self.__where_condition_list
+        del self.__holder_value_list
         del self.__select
         del self.__insert_or_update_list
         del self.__order_by_list
@@ -417,7 +419,13 @@ class SqlManager:
         conn = self._connect()
         cur = conn.cursor()
 
-        cur.execute(self._query_build(BaseQueryType.UPDATE))
+        query = self._query_build(BaseQueryType.UPDATE)
+        if len(self.__holder_value_list) == 0:
+            cur.execute(query)
+        else:
+            cur.execute(query, tuple(self.__holder_value_list))
+            self.__holder_value_list = []
+        
         conn.commit()
 
         cur.close
@@ -438,7 +446,13 @@ class SqlManager:
         conn = self._connect()
         cur = conn.cursor()
 
-        cur.execute(self._query_build(BaseQueryType.INSERT))
+        query = self._query_build(BaseQueryType.INSERT)
+        if len(self.__holder_value_list) == 0:
+            cur.execute(query)
+        else:
+            cur.execute(query, tuple(self.__holder_value_list))
+            self.__holder_value_list = []
+
         conn.commit()
 
         cur.close
@@ -463,8 +477,12 @@ class SqlManager:
         cur = conn.cursor()
 
         self.__select.append("COUNT(*)")
-        cur.execute(self._query_build(BaseQueryType.SELECT))
-
+        query = self._query_build(BaseQueryType.SELECT)
+        if len(self.__holder_value_list) == 0:
+            cur.execute(query)
+        else:
+            cur.execute(query, tuple(self.__holder_value_list))
+            self.__holder_value_list = []
         rows = cur.fetchall()
 
         cur.close
@@ -483,8 +501,12 @@ class SqlManager:
         conn = self._connect()
         cur = conn.cursor()
 
-        cur.execute(self._query_build(BaseQueryType.DELETE))
-        conn.commit()
+        query = self._query_build(BaseQueryType.DELETE)
+        if len(self.__holder_value_list) == 0:
+            cur.execute(query)
+        else:
+            cur.execute(query, tuple(self.__holder_value_list))
+            self.__holder_value_list = []
 
         cur.close
         conn.close
@@ -511,7 +533,12 @@ class SqlManager:
         conn = self._connect()
         cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
 
-        cur.execute(self._query_build(BaseQueryType.SELECT))
+        query = self._query_build(BaseQueryType.SELECT)
+        if len(self.__holder_value_list) == 0:
+            cur.execute(query)
+        else:
+            cur.execute(query, tuple(self.__holder_value_list))
+            self.__holder_value_list = []
 
         rows = cur.fetchall()
 
@@ -551,16 +578,25 @@ class SqlManager:
                         if type(datum) is int:
                             in_wheres.append(datum)
                         else:
-                            in_wheres.append("\'{}\'".format(datum))
+                            #in_wheres.append("\'{}\'".format(datum))
+                            in_wheres.append(datum)
                     # joinは文字列配列のみ対応しているため、文字列以外がくる場合は下記のように対応する必要がある。
-                    wheres.append(
-                        f"`{column}` {condition} (" + ', '.join([str(in_value) for in_value in in_wheres]) + ")")
+                    #wheres.append(
+                    #    f"`{column}` {condition} (" + ', '.join([str(in_value) for in_value in in_wheres]) + ")")
+                        wheres.append(
+                        f"`{column}` {condition} (" + ', '.join(["%s"] * len(in_wheres)) + ")")
+                    self.__holder_value_list.extend(in_wheres)
                 else:
                     # >, >=, <, <=, LIKE, IS NULL, IS NOT NULL
                     if type(value) is int:
-                        wheres.append(f"`{column}` {condition} {value}")
+                        #wheres.append(f"`{column}` {condition} {value}")
+                        wheres.append(f"`{column}` {condition} %s")
+                        self.__holder_value_list.append(f"{value}")
                     else:
-                        wheres.append(f"`{column}` {condition} \'{value}\'")
+                        #wheres.append(f"`{column}` {condition} \'{value}\'")
+                        wheres.append(f"`{column}` {condition} %s")
+                        self.__holder_value_list.append(value)
+
 
         query = ' WHERE ' + ' AND '.join(wheres)
 
