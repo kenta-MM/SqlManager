@@ -33,7 +33,11 @@ class SqlManager:
         self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
-        self.__holder_value_list = []
+        self.__holder_value_list = {
+            'insert' : [],
+            'update' : [],
+            'where' : []
+        }
         self.__select = []
         self.__insert_or_update_list = []
         self.__order_by_list = []
@@ -420,11 +424,9 @@ class SqlManager:
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.UPDATE)
-        if len(self.__holder_value_list) == 0:
-            cur.execute(query)
-        else:
-            cur.execute(query, tuple(self.__holder_value_list))
-            self.__holder_value_list = []
+        cur.execute(query, tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where']))
+        self.__holder_value_list['update'] = []
+        self.__holder_value_list['where'] = []
         
         conn.commit()
 
@@ -447,11 +449,9 @@ class SqlManager:
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.INSERT)
-        if len(self.__holder_value_list) == 0:
-            cur.execute(query)
-        else:
-            cur.execute(query, tuple(self.__holder_value_list))
-            self.__holder_value_list = []
+
+        cur.execute(query, tuple(self.__holder_value_list['insert']))
+        self.__holder_value_list['insert'] = []
 
         conn.commit()
 
@@ -478,11 +478,11 @@ class SqlManager:
 
         self.__select.append("COUNT(*)")
         query = self._query_build(BaseQueryType.SELECT)
-        if len(self.__holder_value_list) == 0:
+        if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
         else:
-            cur.execute(query, tuple(self.__holder_value_list))
-            self.__holder_value_list = []
+            cur.execute(query, tuple(self.__holder_value_list['where']))
+            self.__holder_value_list['where'] = []
         rows = cur.fetchall()
 
         cur.close
@@ -502,12 +502,14 @@ class SqlManager:
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.DELETE)
-        if len(self.__holder_value_list) == 0:
+
+        if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
         else:
-            cur.execute(query, tuple(self.__holder_value_list))
-            self.__holder_value_list = []
-
+            cur.execute(query, tuple(self.__holder_value_list['where']))
+            self.__holder_value_list['where'] = []
+    
+        conn.commit()
         cur.close
         conn.close
 
@@ -534,11 +536,11 @@ class SqlManager:
         cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
 
         query = self._query_build(BaseQueryType.SELECT)
-        if len(self.__holder_value_list) == 0:
+        if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
         else:
-            cur.execute(query, tuple(self.__holder_value_list))
-            self.__holder_value_list = []
+            cur.execute(query, tuple(self.__holder_value_list['where']))
+            self.__holder_value_list['where'] = []
 
         rows = cur.fetchall()
 
@@ -573,29 +575,13 @@ class SqlManager:
                 condition = where_condition[column]
 
                 if 'IN' in condition:
-                    in_wheres = []
-                    for datum in value:
-                        if type(datum) is int:
-                            in_wheres.append(datum)
-                        else:
-                            #in_wheres.append("\'{}\'".format(datum))
-                            in_wheres.append(datum)
-                    # joinは文字列配列のみ対応しているため、文字列以外がくる場合は下記のように対応する必要がある。
-                    #wheres.append(
-                    #    f"`{column}` {condition} (" + ', '.join([str(in_value) for in_value in in_wheres]) + ")")
-                        wheres.append(
-                        f"`{column}` {condition} (" + ', '.join(["%s"] * len(in_wheres)) + ")")
-                    self.__holder_value_list.extend(in_wheres)
+                    wheres.append(
+                        f"`{column}` {condition} (" + ', '.join(["%s"] * len(value)) + ")")
+                    self.__holder_value_list['where'].extend(value)
                 else:
                     # >, >=, <, <=, LIKE, IS NULL, IS NOT NULL
-                    if type(value) is int:
-                        #wheres.append(f"`{column}` {condition} {value}")
-                        wheres.append(f"`{column}` {condition} %s")
-                        self.__holder_value_list.append(f"{value}")
-                    else:
-                        #wheres.append(f"`{column}` {condition} \'{value}\'")
-                        wheres.append(f"`{column}` {condition} %s")
-                        self.__holder_value_list.append(value)
+                    wheres.append(f"`{column}` {condition} %s")
+                    self.__holder_value_list['where'].append(value)
 
 
         query = ' WHERE ' + ' AND '.join(wheres)
@@ -625,13 +611,10 @@ class SqlManager:
             for key in insert_or_update.keys():
                 column = key
                 value = insert_or_update[column]
+                insert_list.append(value)
 
-                if type(value) is int:
-                    insert_list.append(value)
-                else:
-                    insert_list.append(f"\'{value}\'")
-            multiple_insert_list.append(
-                "(" + ','.join([str(in_value) for in_value in insert_list]) + ")")
+            self.__holder_value_list['insert'].extend(insert_list)
+            multiple_insert_list.append("(" + ', '.join(["%s"] * len(insert_list)) + ")")
         query += ",".join(multiple_insert_list)
 
         return query
@@ -656,11 +639,8 @@ class SqlManager:
         for key in insert_or_update.keys():
             column = key
             value = insert_or_update[column]
-
-            if type(value) is int:
-                update_list.append(f"`{column}` = {value}")
-            else:
-                update_list.append(f"`{column}` = \"{value}\"")
+            update_list.append(f"`{column}` = %s")
+            self.__holder_value_list['update'].append(value)
 
         query += ",".join(update_list)
 
