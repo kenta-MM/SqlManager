@@ -278,10 +278,7 @@ class SqlManager:
                 自身のインスタンス            
         """
 
-        if self._is_use_aggregate_functions(column) is True:
-            query_select = f"{format(column)}"
-        else:
-            query_select = f"`{format(column)}`"
+        query_select = f"{format(column)}" if self._is_use_aggregate_functions(column) else f"`{format(column)}`"
 
         if as_column is not None:
             query_select += f" AS {format(as_column)}"
@@ -570,8 +567,7 @@ class SqlManager:
         for i, where in enumerate(self.__where_list):
 
             where_condition = self.__where_condition_list[i]
-            for column in where.keys():
-                value = where[column]
+            for column, value in where.items():
                 condition = where_condition[column]
 
                 if 'IN' in condition:
@@ -582,7 +578,6 @@ class SqlManager:
                     # >, >=, <, <=, LIKE, IS NULL, IS NOT NULL
                     wheres.append(f"`{column}` {condition} %s")
                     self.__holder_value_list['where'].append(value)
-
 
         query = ' WHERE ' + ' AND '.join(wheres)
 
@@ -607,12 +602,7 @@ class SqlManager:
 
         multiple_insert_list = []
         for insert_or_update in insert_or_update_list:
-            insert_list = []
-            for key in insert_or_update.keys():
-                column = key
-                value = insert_or_update[column]
-                insert_list.append(value)
-
+            insert_list = insert_or_update.values()
             self.__holder_value_list['insert'].extend(insert_list)
             multiple_insert_list.append("(" + ', '.join(["%s"] * len(insert_list)) + ")")
         query += ",".join(multiple_insert_list)
@@ -636,9 +626,7 @@ class SqlManager:
         # 配列データが格納されているが１つしか存在しない
         insert_or_update = self.__insert_or_update_list[0]
 
-        for key in insert_or_update.keys():
-            column = key
-            value = insert_or_update[column]
+        for column, value in insert_or_update.items():
             update_list.append(f"`{column}` = %s")
             self.__holder_value_list['update'].append(value)
 
@@ -704,7 +692,6 @@ class SqlManager:
             print(
                 f"指定したクエリタイプは対応されていません。 base_query_type = {type(self.__table)}")
 
-        self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
         self.__select = []
