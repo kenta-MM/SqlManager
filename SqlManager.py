@@ -692,7 +692,6 @@ class SqlManager:
             print(
                 f"指定したクエリタイプは対応されていません。 base_query_type = {type(self.__table)}")
 
-        self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
         self.__select = []
