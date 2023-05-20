@@ -225,7 +225,7 @@ class SqlManager:
         """
         self._add_wheres(column, value, 'LIKE')
 
-    def where_is_null(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
+    def where_is_null(self, column: str) -> 'SqlManager':
         """
         where句(IS NULL)
 
@@ -233,17 +233,15 @@ class SqlManager:
         ----------
         column : str
             where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
 
         Returns
         -------
             self : SqlManager
                 自身のインスタンス
         """
-        self._add_wheres(column, value, 'IS NULL')
+        self._add_wheres(column, None, 'IS NULL')
 
-    def where_is_not_null(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
+    def where_is_not_null(self, column: str) -> 'SqlManager':
         """
         where句(IS NOT NULL)
 
@@ -259,7 +257,7 @@ class SqlManager:
             self : SqlManager
                 自身のインスタンス
         """
-        self._add_wheres(column, value, 'IS NOT NULL')
+        self._add_wheres(column, None, 'IS NOT NULL')
 
     def select(self, column: str, as_column: str = None) -> 'SqlManager':
         """
@@ -411,7 +409,7 @@ class SqlManager:
             self: SqlManager
                 自身のインスタンス            
         """
-        self.__group_by = "GROUP BY "  + column if type(column) is str else ','.join(column) + ' '
+        self.__group_by = " GROUP BY " + (column if type(column) is str else ', '.join(column) + ' ')
 
     def update(self) -> None:
         """
@@ -574,8 +572,11 @@ class SqlManager:
                     wheres.append(
                         f"`{column}` {condition} (" + ', '.join(["%s"] * len(value)) + ")")
                     self.__holder_value_list['where'].extend(value)
+                elif 'IS NULL' in condition or 'IS NOT NULL' in condition:
+                    wheres.append(
+                        f"`{column}` {condition}")
                 else:
-                    # >, >=, <, <=, LIKE, IS NULL, IS NOT NULL
+                    # >, >=, <, <=, LIKE
                     wheres.append(f"`{column}` {condition} %s")
                     self.__holder_value_list['where'].append(value)
 
@@ -598,7 +599,7 @@ class SqlManager:
 
         columns = [f"`{miexed}`" for miexed in insert_or_update_list[0]]
 
-        query += f"({','.join(columns)}) VALUES"
+        query += f"({', '.join(columns)}) VALUES"
 
         multiple_insert_list = []
         for insert_or_update in insert_or_update_list:
@@ -630,7 +631,7 @@ class SqlManager:
             update_list.append(f"`{column}` = %s")
             self.__holder_value_list['update'].append(value)
 
-        query += ",".join(update_list)
+        query += ", ".join(update_list)
 
         return query
 
