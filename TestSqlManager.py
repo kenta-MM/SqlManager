@@ -204,6 +204,34 @@ class TestSqlManager(unittest.TestCase):
         sqlManager.select('count(*)')
         self.assertEqual((('test_group_by_a', 1, 2),('test_group_by_b', 1, 1)), sqlManager.find_records())
 
+    def test_transaction(self):
+        sqlManager = self.__get_sql_manager()
+
+        sqlManager.from_table('test')
+        sqlManager.set('name', 'test_transaction')
+        sqlManager.set('type', 1)
+        sqlManager.create()
+
+        sqlManager.begin_transaction()
+        sqlManager.where('name', 'test_transaction')
+        sqlManager.set('name', 'test_transaction_commit')
+        sqlManager.update()
+        sqlManager.end_transaction(True)
+
+        sqlManager.where('name', 'test_transaction_commit')
+        sqlManager.select('name')
+        self.assertEqual((('test_transaction_commit',),), sqlManager.find_records())
+
+        sqlManager.begin_transaction()
+        sqlManager.where('name', 'test_transaction')
+        sqlManager.set('name', 'test_transaction_rollback')
+        sqlManager.update()
+        sqlManager.end_transaction(False)
+
+        sqlManager.where('name', 'test_transaction_rollback')
+        sqlManager.select('name')
+        self.assertEqual((), sqlManager.find_records())
+
 
     def __get_connect_mock(self) -> MagicMock:
         """
