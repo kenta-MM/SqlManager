@@ -42,6 +42,8 @@ class SqlManager:
         self.__insert_or_update_list = []
         self.__order_by_list = []
         self.__group_by = ''
+        self.__enable_transaction = False
+        self.__connection = None
 
     def __del__(self) -> None:
         """
@@ -55,6 +57,29 @@ class SqlManager:
         del self.__insert_or_update_list
         del self.__order_by_list
         del self.__group_by
+        del self.__enable_transaction
+        del self.__connection
+
+    def begin_transaction(self) -> None:
+        """
+        トランザクション開始
+        """
+        self.__enable_transaction = True
+
+    def end_transaction(self, is_succeed: bool) -> None:
+        """
+        トランザクション終了
+
+        Parameters
+        ----------
+            is_succeed : bool
+                処理が成功したのならばコミットする。
+                してなければrollbackする。
+        """
+        self.__enable_transaction = False
+        self.__connection.commit() if is_succeed else self.__connection.rollback()
+        self.__connection.close()
+        self.__connection = None
 
     def from_table(self, table: str) -> 'SqlManager':
         """
@@ -415,7 +440,14 @@ class SqlManager:
         """
         データを更新する
         """
-        conn = self._connect()
+        if self.__enable_transaction:
+            conn =  self._connect() if self.__connection is None else self.__connection 
+            conn.autocommit(False)
+            self.__connection = conn
+        else:
+            conn = self._connect()
+            conn.autocommit(True)
+    
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.UPDATE)
@@ -423,13 +455,15 @@ class SqlManager:
         self.__holder_value_list['update'] = []
         self.__holder_value_list['where'] = []
         
-        conn.commit()
-
-        cur.close
-        conn.close
-
-        del cur
-        del conn
+        if self.__enable_transaction:
+            cur.close
+            del cur
+        else:
+            conn.commit()
+            cur.close
+            conn.close
+            del cur
+            del conn
 
     def create(self) -> None:
         """
@@ -440,7 +474,14 @@ class SqlManager:
             self : SqlManager
                 自身のインスタンス
         """
-        conn = self._connect()
+        if self.__enable_transaction:
+            conn =  self._connect() if self.__connection is None else self.__connection 
+            conn.autocommit(False)
+            self.__connection = conn
+        else:
+            conn = self._connect()
+            conn.autocommit(True)
+
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.INSERT)
@@ -448,13 +489,15 @@ class SqlManager:
         cur.execute(query, tuple(self.__holder_value_list['insert']))
         self.__holder_value_list['insert'] = []
 
-        conn.commit()
-
-        cur.close
-        conn.close
-
-        del cur
-        del conn
+        if self.__enable_transaction:
+            cur.close
+            del cur
+        else:
+            conn.commit()
+            cur.close
+            conn.close
+            del cur
+            del conn
 
         return self
 
@@ -468,7 +511,14 @@ class SqlManager:
                 レコード数
         """
 
-        conn = self._connect()
+        if self.__enable_transaction:
+            conn =  self._connect() if self.__connection is None else self.__connection 
+            conn.autocommit(False)
+            self.__connection = conn
+        else:
+            conn = self._connect()
+            conn.autocommit(True)
+
         cur = conn.cursor()
 
         self.__select.append("COUNT(*)")
@@ -480,11 +530,14 @@ class SqlManager:
             self.__holder_value_list['where'] = []
         rows = cur.fetchall()
 
-        cur.close
-        conn.close
-
-        del cur
-        del conn
+        if self.__enable_transaction:
+            cur.close
+            del cur
+        else:
+            cur.close
+            conn.close
+            del cur
+            del conn
 
         return int(rows[0][0])
 
@@ -493,7 +546,14 @@ class SqlManager:
         レコードを削除する
         """
 
-        conn = self._connect()
+        if self.__enable_transaction:
+            conn =  self._connect() if self.__connection is None else self.__connection 
+            conn.autocommit(False)
+            self.__connection = conn
+        else:
+            conn = self._connect()
+            conn.autocommit(True)
+
         cur = conn.cursor()
 
         query = self._query_build(BaseQueryType.DELETE)
@@ -504,13 +564,16 @@ class SqlManager:
             cur.execute(query, tuple(self.__holder_value_list['where']))
             self.__holder_value_list['where'] = []
     
-        conn.commit()
-        cur.close
-        conn.close
+        if self.__enable_transaction:
+            cur.close
+            del cur
+        else:
+            conn.commit()
+            cur.close
+            conn.close
+            del cur
+            del conn
 
-        del cur
-        del conn
-    
     def find_records(self, is_dict_cursor:bool = False) -> Any:
         """
         複数データを取得する
@@ -527,7 +590,14 @@ class SqlManager:
             is_dict_cursor が Trueの場合  [{'key1' : 1, 'key2' : 2, ...},...]
         """
 
-        conn = self._connect()
+        if self.__enable_transaction:
+            conn =  self._connect() if self.__connection is None else self.__connection 
+            conn.autocommit(False)
+            self.__connection = conn
+        else:
+            conn = self._connect()
+            conn.autocommit(True)
+
         cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
 
         query = self._query_build(BaseQueryType.SELECT)
@@ -539,11 +609,14 @@ class SqlManager:
 
         rows = cur.fetchall()
 
-        cur.close
-        conn.close
-
-        del cur
-        del conn
+        if self.__enable_transaction:
+            cur.close
+            del cur
+        else:
+            cur.close
+            conn.close
+            del cur
+            del conn
 
         return rows
 
