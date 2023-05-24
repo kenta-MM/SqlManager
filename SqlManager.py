@@ -521,7 +521,7 @@ class SqlManager:
 
         cur = conn.cursor()
 
-        self.__select.append("COUNT(*)")
+        self.select("COUNT(*)")
         query = self._query_build(BaseQueryType.SELECT)
         if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
