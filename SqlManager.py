@@ -6,7 +6,7 @@ from typing import Any
 import datetime
 from functools import singledispatchmethod
 
-class BaseQueryType(Enum):
+class ExecuteQueryType(Enum):
     SELECT = 1
     INSERT = 2
     UPDATE = 3
@@ -450,7 +450,7 @@ class SqlManager:
     
         cur = conn.cursor()
 
-        query = self._query_build(BaseQueryType.UPDATE)
+        query = self._query_build(ExecuteQueryType.UPDATE)
         cur.execute(query, tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where']))
         self.__holder_value_list['update'] = []
         self.__holder_value_list['where'] = []
@@ -484,7 +484,7 @@ class SqlManager:
 
         cur = conn.cursor()
 
-        query = self._query_build(BaseQueryType.INSERT)
+        query = self._query_build(ExecuteQueryType.INSERT)
 
         cur.execute(query, tuple(self.__holder_value_list['insert']))
         self.__holder_value_list['insert'] = []
@@ -522,7 +522,7 @@ class SqlManager:
         cur = conn.cursor()
 
         self.select("COUNT(*)")
-        query = self._query_build(BaseQueryType.SELECT)
+        query = self._query_build(ExecuteQueryType.SELECT)
         if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
         else:
@@ -556,7 +556,7 @@ class SqlManager:
 
         cur = conn.cursor()
 
-        query = self._query_build(BaseQueryType.DELETE)
+        query = self._query_build(ExecuteQueryType.DELETE)
 
         if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
@@ -600,7 +600,7 @@ class SqlManager:
 
         cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
 
-        query = self._query_build(BaseQueryType.SELECT)
+        query = self._query_build(ExecuteQueryType.SELECT)
         if len(self.__holder_value_list['where']) == 0:
             cur.execute(query)
         else:
@@ -729,7 +729,7 @@ class SqlManager:
         
         return query
 
-    def _query_build(self, baseQueryType: BaseQueryType) -> str:
+    def _query_build(self, ExecuteQueryType: ExecuteQueryType) -> str:
         """
         クエリを組み立てる
 
@@ -741,7 +741,7 @@ class SqlManager:
 
         query = ""
 
-        if baseQueryType == BaseQueryType.SELECT:
+        if ExecuteQueryType == ExecuteQueryType.SELECT:
             if len(self.__select) == 0:
                 self.__select.append("*")
             query = "SELECT {} FROM {}".format(
@@ -750,15 +750,15 @@ class SqlManager:
             query += self._query_order_build()
             query += self.__group_by
 
-        elif baseQueryType == BaseQueryType.INSERT:
+        elif ExecuteQueryType == ExecuteQueryType.INSERT:
             query = f"INSERT INTO {self.__table}"
             query += self._query_insert_build()
     
-        elif baseQueryType == BaseQueryType.DELETE:
+        elif ExecuteQueryType == ExecuteQueryType.DELETE:
             query = f"DELETE FROM {self.__table}"
             query += self._query_where_build()
 
-        elif baseQueryType == BaseQueryType.UPDATE:
+        elif ExecuteQueryType == ExecuteQueryType.UPDATE:
             query = f"UPDATE {self.__table} SET "
             query += self._query_update_build()
             query += self._query_where_build()
