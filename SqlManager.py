@@ -11,6 +11,7 @@ class ExecuteQueryType(Enum):
     INSERT = 2
     UPDATE = 3
     DELETE = 4
+    COUNT = 5
 
 
 class SqlManager:
@@ -440,30 +441,7 @@ class SqlManager:
         """
         データを更新する
         """
-        if self.__enable_transaction:
-            conn =  self._connect() if self.__connection is None else self.__connection 
-            conn.autocommit(False)
-            self.__connection = conn
-        else:
-            conn = self._connect()
-            conn.autocommit(True)
-    
-        cur = conn.cursor()
-
-        query = self._query_build(ExecuteQueryType.UPDATE)
-        cur.execute(query, tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where']))
-        self.__holder_value_list['update'] = []
-        self.__holder_value_list['where'] = []
-        
-        if self.__enable_transaction:
-            cur.close
-            del cur
-        else:
-            conn.commit()
-            cur.close
-            conn.close
-            del cur
-            del conn
+        self._execute(ExecuteQueryType.UPDATE)
 
     def create(self) -> None:
         """
@@ -474,32 +452,7 @@ class SqlManager:
             self : SqlManager
                 自身のインスタンス
         """
-        if self.__enable_transaction:
-            conn =  self._connect() if self.__connection is None else self.__connection 
-            conn.autocommit(False)
-            self.__connection = conn
-        else:
-            conn = self._connect()
-            conn.autocommit(True)
-
-        cur = conn.cursor()
-
-        query = self._query_build(ExecuteQueryType.INSERT)
-
-        cur.execute(query, tuple(self.__holder_value_list['insert']))
-        self.__holder_value_list['insert'] = []
-
-        if self.__enable_transaction:
-            cur.close
-            del cur
-        else:
-            conn.commit()
-            cur.close
-            conn.close
-            del cur
-            del conn
-
-        return self
+        self._execute(ExecuteQueryType.INSERT)
 
     def count(self) -> int:
         """
@@ -510,69 +463,13 @@ class SqlManager:
             int(rows[0][0]) : int
                 レコード数
         """
-
-        if self.__enable_transaction:
-            conn =  self._connect() if self.__connection is None else self.__connection 
-            conn.autocommit(False)
-            self.__connection = conn
-        else:
-            conn = self._connect()
-            conn.autocommit(True)
-
-        cur = conn.cursor()
-
-        self.select("COUNT(*)")
-        query = self._query_build(ExecuteQueryType.SELECT)
-        if len(self.__holder_value_list['where']) == 0:
-            cur.execute(query)
-        else:
-            cur.execute(query, tuple(self.__holder_value_list['where']))
-            self.__holder_value_list['where'] = []
-        rows = cur.fetchall()
-
-        if self.__enable_transaction:
-            cur.close
-            del cur
-        else:
-            cur.close
-            conn.close
-            del cur
-            del conn
-
-        return int(rows[0][0])
+        return self._execute(ExecuteQueryType.COUNT)
 
     def delete(self) -> None:
         """
         レコードを削除する
         """
-
-        if self.__enable_transaction:
-            conn =  self._connect() if self.__connection is None else self.__connection 
-            conn.autocommit(False)
-            self.__connection = conn
-        else:
-            conn = self._connect()
-            conn.autocommit(True)
-
-        cur = conn.cursor()
-
-        query = self._query_build(ExecuteQueryType.DELETE)
-
-        if len(self.__holder_value_list['where']) == 0:
-            cur.execute(query)
-        else:
-            cur.execute(query, tuple(self.__holder_value_list['where']))
-            self.__holder_value_list['where'] = []
-    
-        if self.__enable_transaction:
-            cur.close
-            del cur
-        else:
-            conn.commit()
-            cur.close
-            conn.close
-            del cur
-            del conn
+        self._execute(ExecuteQueryType.DELETE)
 
     def find_records(self, is_dict_cursor:bool = False) -> Any:
         """
@@ -589,7 +486,26 @@ class SqlManager:
 
             is_dict_cursor が Trueの場合  [{'key1' : 1, 'key2' : 2, ...},...]
         """
+        return self._execute(ExecuteQueryType.SELECT, is_dict_cursor)
 
+    def _execute(self, execute_query_type: ExecuteQueryType, is_dict_cursor: Union[bool, None] = None):
+        """
+        実行クエリタイプに沿ったクエリの実行を行う。
+
+        Paramters
+        ---------
+            execute_query_type: ExecuteQueryType
+                実行クエリタイプ
+            
+            is_dict_cursor: Union[bool, None]
+                Dict形式で取得するかどうか(Falseの場合はlist形式)
+
+        Returns
+        -------
+            retValue: Any
+                execute_query_type が SELECTの場合: list
+                execute_query_type が COUNTの場合: int
+        """
         if self.__enable_transaction:
             conn =  self._connect() if self.__connection is None else self.__connection 
             conn.autocommit(False)
@@ -600,14 +516,31 @@ class SqlManager:
 
         cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
 
-        query = self._query_build(ExecuteQueryType.SELECT)
-        if len(self.__holder_value_list['where']) == 0:
+        query = self._query_build(execute_query_type)
+
+        holder_value_list = None
+        if execute_query_type in [ExecuteQueryType.SELECT, ExecuteQueryType.DELETE, ExecuteQueryType.COUNT]:
+            holder_value_list = None if len(self.__holder_value_list['where']) == 0 else tuple(self.__holder_value_list['where'])
+        elif execute_query_type == ExecuteQueryType.INSERT:
+            holder_value_list = None if len(self.__holder_value_list['insert']) == 0 else tuple(self.__holder_value_list['insert'])
+        elif execute_query_type == ExecuteQueryType.UPDATE:
+            holder_value_list = tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where'])
+
+        if holder_value_list is None:
             cur.execute(query)
         else:
-            cur.execute(query, tuple(self.__holder_value_list['where']))
-            self.__holder_value_list['where'] = []
+            cur.execute(query, holder_value_list)
+            
+        self.__holder_value_list['where'] = []
+        self.__holder_value_list['insert'] = []
+        self.__holder_value_list['update'] = []
 
-        rows = cur.fetchall()
+        retVal = None
+        if execute_query_type == ExecuteQueryType.SELECT:
+            retVal = cur.fetchall()
+        elif execute_query_type == ExecuteQueryType.COUNT:
+            rows = cur.fetchall()
+            retVal = int(rows[0][0])
 
         if self.__enable_transaction:
             cur.close
@@ -617,8 +550,8 @@ class SqlManager:
             conn.close
             del cur
             del conn
-
-        return rows
+        
+        return retVal
 
     def _query_where_build(self) -> str:
         """
@@ -762,6 +695,13 @@ class SqlManager:
             query = f"UPDATE {self.__table} SET "
             query += self._query_update_build()
             query += self._query_where_build()
+        
+        elif ExecuteQueryType == ExecuteQueryType.COUNT:
+            query = f"SELECT COUNT(*) FROM {self.__table} "
+            query += self._query_where_build()
+            query += self._query_order_build()
+            query += self.__group_by
+
         else:
             print(
                 f"指定したクエリタイプは対応されていません。 base_query_type = {type(self.__table)}")
