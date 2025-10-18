@@ -2,6 +2,7 @@ import re
 from enum import Enum
 from typing import Union
 from typing import Any
+from typing import Tuple
 import datetime
 from functools import singledispatchmethod
 
@@ -45,6 +46,8 @@ class SqlManager:
         self.__group_by = ''
         self.__enable_transaction = False
         self.__connection = None
+        self.__last_query = ''
+        self.__last_parameters = None
 
     def __del__(self) -> None:
         """
@@ -60,6 +63,8 @@ class SqlManager:
         del self.__group_by
         del self.__enable_transaction
         del self.__connection
+        del self.__last_query
+        del self.__last_parameters
 
     def begin_transaction(self) -> None:
         """
@@ -524,6 +529,9 @@ class SqlManager:
         elif execute_query_type == ExecuteQueryType.UPDATE:
             holder_value_list = tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where'])
 
+        self.__last_query = query
+        self.__last_parameters = holder_value_list
+
         if holder_value_list is None:
             cur.execute(query)
         else:
@@ -550,6 +558,42 @@ class SqlManager:
             del conn
         
         return retVal
+
+    def get_last_query(self) -> str:
+        """
+        直近で実行したクエリ文字列を取得する
+
+        Returns
+        -------
+            str
+                実行したクエリ文字列
+        """
+
+        return self.__last_query
+
+    def get_last_parameters(self) -> Union[tuple, None]:
+        """
+        直近で実行したクエリのプレースホルダーに設定された値を取得する
+
+        Returns
+        -------
+            Union[tuple, None]
+                プレースホルダーに設定した値
+        """
+
+        return self.__last_parameters
+
+    def get_last_query_info(self) -> Tuple[str, Union[tuple, None]]:
+        """
+        直近で実行したクエリ情報を取得する
+
+        Returns
+        -------
+            tuple[str, Union[tuple, None]]
+                クエリ文字列とプレースホルダーに設定した値の組み合わせ
+        """
+
+        return self.__last_query, self.__last_parameters
 
     def _query_where_build(self) -> str:
         """
