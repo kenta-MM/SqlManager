@@ -1,4 +1,3 @@
-import MySQLdb
 import re
 from enum import Enum
 from typing import Union
@@ -31,6 +30,7 @@ class SqlManager:
             'host': settings['host'],
             'db': settings['db']
         }
+        self.__driver = settings.get('driver', 'mysqldb').lower()
         self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
@@ -506,16 +506,14 @@ class SqlManager:
                 execute_query_type が SELECTの場合: list
                 execute_query_type が COUNTの場合: int
         """
+        conn = self._connect() if not self.__enable_transaction else (self.__connection or self._connect())
         if self.__enable_transaction:
-            conn =  self._connect() if self.__connection is None else self.__connection 
             conn.autocommit(False)
             self.__connection = conn
         else:
-            conn = self._connect()
             conn.autocommit(True)
 
-        cur = conn.cursor(MySQLdb.cursors.DictCursor) if is_dict_cursor else conn.cursor()
-
+        cur = self._get_cursor(conn, is_dict_cursor)
         query = self._query_build(execute_query_type)
 
         holder_value_list = None
@@ -715,7 +713,7 @@ class SqlManager:
 
         return query
 
-    def _connect(self) -> MySQLdb:
+    def _connect(self):
         """"
         MySQLに接続する
 
@@ -726,12 +724,28 @@ class SqlManager:
         """
         setting = self.__default_setting
 
-        return MySQLdb.connect(
-            user=setting['user'],
-            passwd=setting['passwd'],
-            host=setting['host'],
-            db=setting['db']
-        )
+        if self.__driver == 'pymysql':
+            import pymysql
+            return pymysql.connect(
+                user=setting['user'],
+                passwd=setting['passwd'],
+                host=setting['host'],
+                db=setting['db'],
+                charset=setting['charset'] if 'charset' in setting else 'utf8mb4',
+                autocommit=setting['autocommit'] if 'autocommit' in setting else True
+            )
+        # mysqldbがないので現在使えない
+        # else self.__driver == 'mysqldb':
+        #     import MySQLdb
+        #     if 'charset' in setting:
+        #     return MySQLdb.connect(
+        #         user=setting['user'],
+        #         passwd=setting['passwd'],
+        #         host=setting['host'],
+        #         db=setting['db']
+        #     )
+        else:
+            return ValueError(f"Unsupported driver: {self.__driver}")
 
     def _add_wheres(self, column: str, value: Any, condtion: str) -> None:
         """
@@ -792,3 +806,13 @@ class SqlManager:
                 break
 
         return is_match
+
+
+    def _get_cursor(self, conn, is_dict_cursor):
+        if is_dict_cursor:
+            if self.__driver == "pymysql":
+                from pymysql.cursors import DictCursor
+            else:
+                from MySQLdb.cursors import DictCursor
+            return conn.cursor(DictCursor)
+        return conn.cursor()
