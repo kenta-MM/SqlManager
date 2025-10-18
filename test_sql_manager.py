@@ -5,11 +5,28 @@ from sql_manager import SqlManager
 
 
 class TestSqlManager(unittest.TestCase):
+    """
+    SqlManager クラスの単体テストクラス。
+    実際のデータベースには接続せず、unittest.mock.MagicMock を利用して
+    クエリ生成処理や実行処理が正しく呼び出されているかを検証する。
+    """
 
     def setUp(self):
+        """
+        各テストメソッド実行前に呼び出される初期化処理。
+        _create_sql_manager() を呼び出して、テスト用の SqlManager インスタンス、
+        およびモック化されたコネクション・カーソルを作成する。
+        """
         self.sql_manager, self.connection_mock, self.cursor_mock = self._create_sql_manager()
 
     def _create_sql_manager(self):
+        """
+        テスト用の SqlManager インスタンスを生成し、
+        実際のデータベース接続を行わないように MagicMock でモック化する。
+
+        Returns:
+            tuple: (SqlManagerインスタンス, モックコネクション, モックカーソル)
+        """
         manager = SqlManager({
             'user': 'user',
             'passwd': 'passwd',
@@ -25,11 +42,21 @@ class TestSqlManager(unittest.TestCase):
         connection_mock = MagicMock()
         connection_mock.cursor.return_value = cursor_mock
 
+        # _connect メソッドをモック化して、実際にDB接続しないようにする
         manager._connect = MagicMock(return_value=connection_mock)
 
         return manager, connection_mock, cursor_mock
 
     def assert_last_query(self, expected_query, expected_params, manager=None, cursor=None):
+        """
+        SqlManager が最後に生成・実行したクエリとパラメータを検証する。
+
+        Args:
+            expected_query (str): 期待される SQL クエリ文字列
+            expected_params (tuple or None): 期待されるパラメータ
+            manager (SqlManager, optional): 検証対象の SqlManager。省略時は self.sql_manager を使用。
+            cursor (MagicMock, optional): 検証対象のカーソル。省略時は self.cursor_mock を使用。
+        """
         manager = manager or self.sql_manager
         cursor = cursor or self.cursor_mock
 
@@ -42,6 +69,7 @@ class TestSqlManager(unittest.TestCase):
             cursor.execute.assert_called_once_with(expected_query, expected_params)
 
     def test_create_builds_insert_query_with_single_record(self):
+        """1件のレコードを挿入するINSERTクエリが正しく生成されるかを検証。"""
         self.cursor_mock.execute.reset_mock()
 
         self.sql_manager.from_table('users')
@@ -55,6 +83,7 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query, expected_params)
 
     def test_create_builds_insert_query_with_multiple_records(self):
+        """複数レコードを一括でINSERTするクエリが正しく生成されるかを検証。"""
         manager, _, cursor = self._create_sql_manager()
         cursor.execute.reset_mock()
 
@@ -72,6 +101,7 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query, expected_params, manager=manager, cursor=cursor)
 
     def test_update_builds_update_query_with_where_clause(self):
+        """WHERE句付きのUPDATEクエリが正しく生成されるかを検証。"""
         self.cursor_mock.execute.reset_mock()
 
         self.sql_manager.from_table('users')
@@ -86,6 +116,7 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query, expected_params)
 
     def test_delete_builds_delete_query_with_in_condition(self):
+        """IN句を使ったDELETEクエリが正しく生成されるかを検証。"""
         self.cursor_mock.execute.reset_mock()
 
         self.sql_manager.from_table('users')
@@ -98,6 +129,7 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query, expected_params)
 
     def test_select_builds_query_with_conditions_and_grouping(self):
+        """SELECT文がWHERE・GROUP BY・ORDER BY句を正しく含むかを検証。"""
         self.cursor_mock.execute.reset_mock()
         self.cursor_mock.fetchall.return_value = ()
 
@@ -109,12 +141,16 @@ class TestSqlManager(unittest.TestCase):
         self.sql_manager.group_by('type')
         self.sql_manager.find_records()
 
-        expected_query = "SELECT `name`,COUNT(*) AS name_count FROM users WHERE `name` LIKE %s ORDER BY name ASC  GROUP BY type"
+        expected_query = (
+            "SELECT `name`,COUNT(*) AS name_count FROM users "
+            "WHERE `name` LIKE %s ORDER BY name ASC  GROUP BY type"
+        )
         expected_params = ('a%',)
 
         self.assert_last_query(expected_query, expected_params)
 
     def test_count_builds_query_with_comparison_conditions(self):
+        """COUNT(*)を使った集計クエリが正しく生成され、結果が返るかを検証。"""
         self.cursor_mock.execute.reset_mock()
         self.cursor_mock.fetchall.return_value = ((5,),)
 
@@ -130,10 +166,12 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query, expected_params)
 
     def test_select_handles_null_checks(self):
+        """IS NULL / IS NOT NULL 条件を使ったSELECT文の正しさを検証。"""
         cursor = self.cursor_mock
         cursor.execute.reset_mock()
         cursor.fetchall.return_value = ()
 
+        # IS NULL 条件の確認
         self.sql_manager.from_table('users')
         self.sql_manager.where_is_null('deleted_at')
         self.sql_manager.select('id')
@@ -142,6 +180,7 @@ class TestSqlManager(unittest.TestCase):
         expected_query_null = "SELECT `id` FROM users WHERE `deleted_at` IS NULL"
         self.assert_last_query(expected_query_null, None)
 
+        # IS NOT NULL 条件の確認
         manager, _, cursor = self._create_sql_manager()
         cursor.execute.reset_mock()
         cursor.fetchall.return_value = ()
@@ -155,9 +194,11 @@ class TestSqlManager(unittest.TestCase):
         self.assert_last_query(expected_query_not_null, None, manager=manager, cursor=cursor)
 
     def test_where_not_in_and_comparison_queries(self):
+        """NOT IN, <, <= 条件を使ったクエリが正しく生成されるかを検証。"""
         manager, _, cursor = self._create_sql_manager()
         cursor.execute.reset_mock()
 
+        # NOT IN 条件付き DELETE
         manager.from_table('users')
         manager.where_not_in('status', ['inactive', 'deleted'])
         manager.delete()
@@ -166,6 +207,7 @@ class TestSqlManager(unittest.TestCase):
         expected_delete_params = ('inactive', 'deleted')
         self.assert_last_query(expected_delete_query, expected_delete_params, manager=manager, cursor=cursor)
 
+        # < 条件付き SELECT
         manager_lt, _, cursor_lt = self._create_sql_manager()
         cursor_lt.execute.reset_mock()
         cursor_lt.fetchall.return_value = ()
@@ -179,6 +221,7 @@ class TestSqlManager(unittest.TestCase):
         expected_select_params = (50,)
         self.assert_last_query(expected_select_query, expected_select_params, manager=manager_lt, cursor=cursor_lt)
 
+        # <= 条件付き SELECT
         manager_lte, _, cursor_lte = self._create_sql_manager()
         cursor_lte.execute.reset_mock()
         cursor_lte.fetchall.return_value = ()
