@@ -84,21 +84,20 @@ class TestSqlManager(unittest.TestCase):
 
     def test_create_builds_insert_query_with_multiple_records(self):
         """複数レコードを一括でINSERTするクエリが正しく生成されるかを検証。"""
-        manager, _, cursor = self._create_sql_manager()
-        cursor.execute.reset_mock()
+        self.cursor_mock.execute.reset_mock()
 
-        manager.from_table('users')
-        manager.sets([
+        self.sql_manager.from_table('users')
+        self.sql_manager.sets([
             {'name': 'Alice', 'type': 1},
             {'name': 'Bob', 'type': 2},
             {'name': 'Charlie', 'type': 3},
         ])
-        manager.create()
+        self.sql_manager.create()
 
         expected_query = "INSERT INTO users(`name`, `type`) VALUES(%s, %s),(%s, %s),(%s, %s)"
         expected_params = ('Alice', 1, 'Bob', 2, 'Charlie', 3)
 
-        self.assert_last_query(expected_query, expected_params, manager=manager, cursor=cursor)
+        self.assert_last_query(expected_query, expected_params)
 
     def test_update_builds_update_query_with_where_clause(self):
         """WHERE句付きのUPDATEクエリが正しく生成されるかを検証。"""
@@ -167,11 +166,10 @@ class TestSqlManager(unittest.TestCase):
 
     def test_select_handles_null_checks(self):
         """IS NULL / IS NOT NULL 条件を使ったSELECT文の正しさを検証。"""
-        cursor = self.cursor_mock
-        cursor.execute.reset_mock()
-        cursor.fetchall.return_value = ()
+        # --- IS NULL 条件の確認 ---
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
 
-        # IS NULL 条件の確認
         self.sql_manager.from_table('users')
         self.sql_manager.where_is_null('deleted_at')
         self.sql_manager.select('id')
@@ -195,17 +193,16 @@ class TestSqlManager(unittest.TestCase):
 
     def test_where_not_in_and_comparison_queries(self):
         """NOT IN, <, <= 条件を使ったクエリが正しく生成されるかを検証。"""
-        manager, _, cursor = self._create_sql_manager()
-        cursor.execute.reset_mock()
-
         # NOT IN 条件付き DELETE
-        manager.from_table('users')
-        manager.where_not_in('status', ['inactive', 'deleted'])
-        manager.delete()
+        self.cursor_mock.execute.reset_mock()
+
+        self.sql_manager.from_table('users')
+        self.sql_manager.where_not_in('status', ['inactive', 'deleted'])
+        self.sql_manager.delete()
 
         expected_delete_query = "DELETE FROM users WHERE `status` NOT IN (%s, %s)"
         expected_delete_params = ('inactive', 'deleted')
-        self.assert_last_query(expected_delete_query, expected_delete_params, manager=manager, cursor=cursor)
+        self.assert_last_query(expected_delete_query, expected_delete_params)
 
         # < 条件付き SELECT
         manager_lt, _, cursor_lt = self._create_sql_manager()

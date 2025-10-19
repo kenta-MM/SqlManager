@@ -844,7 +844,7 @@ class SqlManager:
 
         is_match = False
         for pattern in pattern_list:
-            pattern = f"[a-zA-Z0-9_]?{pattern}\(.*\)[a-zA-Z0-9_]?"
+            pattern = rf"[a-zA-Z0-9_]?{pattern}\(.*\)[a-zA-Z0-9_]?"
             if re.search(pattern, column, re.IGNORECASE) != None:
                 is_match = True
                 break
