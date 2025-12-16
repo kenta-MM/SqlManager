@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 from sql_manager import SqlManager
 
 
-class TestSqlManager(unittest.TestCase):
+class TestSqlManagerQuery(unittest.TestCase):
     """
     SqlManager クラスの単体テストクラス。
     実際のデータベースには接続せず、unittest.mock.MagicMock を利用して
