@@ -1,5 +1,5 @@
 import unittest
-from SqlManager.sql_manager import SqlManager
+from sql_manager import SqlManager
 
 class TestSqlManagerMySQL(unittest.TestCase):
 

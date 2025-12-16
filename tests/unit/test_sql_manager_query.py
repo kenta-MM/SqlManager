@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from SqlManager.sql_manager import SqlManager
+from sql_manager import SqlManager
 
 
 class TestSqlManagerQuery(unittest.TestCase):
