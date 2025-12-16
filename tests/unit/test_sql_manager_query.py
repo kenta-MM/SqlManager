@@ -140,13 +140,15 @@ class TestSqlManagerQuery(unittest.TestCase):
         self.sql_manager.group_by('type')
         self.sql_manager.find_records()
 
+        # SqlManager の実装は WHERE -> GROUP BY -> ORDER BY の順で組み立てるため、期待値も合わせる
         expected_query = (
             "SELECT `name`,COUNT(*) AS name_count FROM users "
-            "WHERE `name` LIKE %s ORDER BY name ASC  GROUP BY type"
+            "WHERE `name` LIKE %s GROUP BY `type` ORDER BY name ASC "
         )
         expected_params = ('a%',)
 
         self.assert_last_query(expected_query, expected_params)
+
 
     def test_count_builds_query_with_comparison_conditions(self):
         """COUNT(*)を使った集計クエリが正しく生成され、結果が返るかを検証。"""

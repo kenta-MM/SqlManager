@@ -1,8 +1,6 @@
 import re
 from enum import Enum
-from typing import Union
-from typing import Any
-from typing import Tuple
+from typing import Union, Optional, Sequence, Any, Tuple
 import datetime
 from functools import singledispatchmethod
 
@@ -44,7 +42,7 @@ class SqlManager:
         self.__select = []
         self.__insert_or_update_list = []
         self.__order_by_list = []
-        self.__group_by = ''
+        self.__group_by_columns = []
         self.__enable_transaction = False
         self.__connection = None
         self.__last_query = ''
@@ -61,7 +59,7 @@ class SqlManager:
         del self.__select
         del self.__insert_or_update_list
         del self.__order_by_list
-        del self.__group_by
+        del self.__group_by_columns
         del self.__enable_transaction
         del self.__connection
         del self.__last_query
@@ -459,7 +457,14 @@ class SqlManager:
             self: SqlManager
                 自身のインスタンス            
         """
-        self.__group_by = " GROUP BY " + (column if type(column) is str else ', '.join(column) + ' ')
+
+        if isinstance(column, str):
+            # "a, b" のように渡された場合にも対応したいなら split する
+            cols = [c.strip() for c in column.split(",") if c.strip()]
+        else:
+            cols = [str(c).strip() for c in column if str(c).strip()]
+
+        self.__group_by_columns = cols
 
         return self
 
@@ -570,15 +575,76 @@ class SqlManager:
             retVal = int(rows[0][0])
 
         if self.__enable_transaction:
-            cur.close
+            cur.close()
             del cur
         else:
-            cur.close
-            conn.close
+            cur.close()
+            conn.close()
             del cur
             del conn
         
         return retVal
+
+    def raw_execute(
+            self,
+            query: str,
+            params: Optional[Sequence[Any]] = None,
+            is_dict_cursor: bool = False
+        ):
+            """
+            生SQLを直接実行する
+
+            Parameters
+            ----------
+            query : str
+                実行するSQL
+            params : Optional[Sequence[Any]]
+                プレースホルダ(%s)に渡す値
+            is_dict_cursor : bool
+                True の場合 DictCursor を使用
+
+            Returns
+            -------
+            Any
+                SELECT の場合: fetchall() の結果
+                それ以外: None
+            """
+
+            conn = (
+                self._connect()
+                if not self.__enable_transaction
+                else (self.__connection or self._connect())
+            )
+
+            if self.__enable_transaction:
+                conn.autocommit(False)
+                self.__connection = conn
+            else:
+                conn.autocommit(True)
+
+            cur = self._get_cursor(conn, is_dict_cursor)
+
+            # 実行
+            if params is None:
+                cur.execute(query)
+            else:
+                cur.execute(query, tuple(params))
+
+            # last query 情報を保存
+            self.__last_query = query
+            self.__last_parameters = None if params is None else tuple(params)
+
+            result = None
+            if query.strip().lower().startswith("select"):
+                result = cur.fetchall()
+
+            if self.__enable_transaction:
+                cur.close()
+            else:
+                cur.close()
+                conn.close()
+
+            return result
 
     def get_last_query(self) -> str:
         """
@@ -652,6 +718,22 @@ class SqlManager:
         query = ' WHERE ' + ' AND '.join(wheres)
 
         return query
+    
+    def _query_group_by_build(self) -> str:
+        """
+        group by句のクエリを作成する
+
+        Returns
+        -------
+            str : query
+                作成したクエリ            
+        """
+        if not self.__group_by_columns:
+            return ""
+
+        # カラム名はバッククォートで囲む（関数式が来る可能性があるなら条件分岐してもOK）
+        cols = [f"`{c}`" for c in self.__group_by_columns]
+        return " GROUP BY " + ", ".join(cols)
 
     def _query_insert_build(self) -> str:
         """
@@ -743,8 +825,8 @@ class SqlManager:
             query = "SELECT {} FROM {}".format(
                 ",".join(self.__select), self.__table)
             query += self._query_where_build()
+            query += self._query_group_by_build()
             query += self._query_order_build()
-            query += self.__group_by
 
         elif ExecuteQueryType == ExecuteQueryType.INSERT:
             query = f"INSERT INTO {self.__table}"
@@ -762,8 +844,8 @@ class SqlManager:
         elif ExecuteQueryType == ExecuteQueryType.COUNT:
             query = f"SELECT COUNT(*) FROM {self.__table} "
             query += self._query_where_build()
+            query += self._query_group_by_build()
             query += self._query_order_build()
-            query += self.__group_by
 
         else:
             print(
@@ -774,7 +856,7 @@ class SqlManager:
         self.__select = []
         self.__insert_or_update_list = []
         self.__order_by_list = []
-        self.__group_by = ''
+        self.__group_by_columns = []
 
         return query
 
@@ -811,7 +893,7 @@ class SqlManager:
                 autocommit=setting['autocommit'] if 'autocommit' in setting else True
             )
         else:
-            return ValueError(f"Unsupported driver: {self.__driver}")
+            raise ValueError(f"Unsupported driver: {self.__driver}")
 
     def _add_wheres(self, column: str, value: Any, condtion: str) -> None:
         """

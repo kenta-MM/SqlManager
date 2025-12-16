@@ -2,61 +2,35 @@
 import os
 import unittest
 from dotenv import load_dotenv
-
 from sql_manager import SqlManager
-
-try:
-    import MySQLdb  # mysqlclient
-except ImportError as e:
-    raise ImportError(
-        "MySQLdb(mysqlclient) が必要です。例: pip install mysqlclient"
-    ) from e
-
-
-
-def _db_settings() -> dict:
-    load_dotenv()
-
-    return {
-        "host": os.getenv("DB_HOST"),
-        "user": os.getenv("DB_USER"),
-        "passwd": os.getenv("DB_PASSWORD"),
-        "db": os.getenv("DB_NAME"),
-    }
-
-
-def _connect_raw():
-    s = _db_settings()
-    conn = MySQLdb.connect(
-        host=s["host"],
-        user=s["user"],
-        passwd=s["passwd"],
-        db=s["db"],
-        charset="utf8mb4",
-    )
-    conn.autocommit(True)
-    return conn
-
-
-def _exec_raw(sql: str, params=None):
-    conn = _connect_raw()
-    try:
-        cur = conn.cursor()
-        try:
-            cur.execute(sql, params or ())
-        finally:
-            cur.close()
-    finally:
-        conn.close()
 
 
 class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
+    """
+    SqlManager の公開 API が MySQL 上で正しく動作することを検証する
+    Integration Test。
+
+    - fluent interface（from_table / set / where など）が期待通り動くこと
+    - SELECT / INSERT / UPDATE / DELETE / COUNT / TRANSACTION を網羅
+    - SQL の結果そのものではなく「振る舞い」を保証する
+    """
+
     @classmethod
     def setUpClass(cls):
-        cls.manager = SqlManager(settings=_db_settings())
+        """
+        テスト全体で共通して使用する SqlManager と
+        テスト用テーブルを初期化する。
+        """
+        load_dotenv()
 
-        # テスト用テーブル作成（SqlManager に raw/execute が無い想定なので MySQLdb で用意）
-        _exec_raw(
+        cls.manager = SqlManager(settings={
+            "host": os.getenv("DB_HOST"),
+            "user": os.getenv("DB_USER"),
+            "passwd": os.getenv("DB_PASSWORD"),
+            "db": os.getenv("DB_NAME"),
+        })
+
+        cls.manager.raw_execute(
             """
             CREATE TABLE IF NOT EXISTS test_items (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -69,10 +43,17 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         )
 
     def setUp(self):
-        _exec_raw("TRUNCATE TABLE test_items")
+        """
+        各テストは常にクリーンな状態で開始する。
+        """
+        self.manager.raw_execute("TRUNCATE TABLE test_items")
 
     # ---- 基本: from_table / set / create / find_records ----
     def test_from_table_set_create_find_records(self):
+        """
+        from_table → set → create → find_records の基本的な INSERT / SELECT
+        フローが正しく動作し、INSERTした内容が保存されていることを確認する。
+        """
         self.manager.from_table("test_items")
         self.manager.set("name", "insert test")
         self.manager.set("score", 10)
@@ -81,12 +62,24 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         rows = (
             self.manager
             .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("note")
+            .select("created_at")
             .where("name", "insert test")
-            .find_records()
+            .find_records(is_dict_cursor=True)
         )
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "insert test")
+        self.assertEqual(rows[0]["score"], 10)
+        self.assertIsNone(rows[0]["note"])
+        self.assertIsNone(rows[0]["created_at"])
 
     def test_set_accepts_dict(self):
+        """
+        set() が dict を受け取り、複数カラムを一度に
+        INSERT でき、内容が正しく保存されることを確認する。
+        """
         self.manager.from_table("test_items")
         self.manager.set({"name": "dict insert", "score": 99})
         self.manager.create()
@@ -94,13 +87,24 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         rows = (
             self.manager
             .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("note")
+            .select("created_at")
             .where("name", "dict insert")
-            .find_records()
+            .find_records(is_dict_cursor=True)
         )
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "dict insert")
+        self.assertEqual(rows[0]["score"], 99)
+        self.assertIsNone(rows[0]["note"])
+        self.assertIsNone(rows[0]["created_at"])
 
     def test_sets_insert_multiple(self):
-        # fluent が return self の設計ならこれでOK。もしダメなら戻り値を受けて書き換え。
+        """
+        sets() に list[dict] を渡した場合、
+        複数レコードが一度に INSERT され、内容が正しいことを確認する。
+        """
         self.manager.from_table("test_items")
         self.manager.sets([
             {"name": "a", "score": 1},
@@ -108,47 +112,71 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         ])
         self.manager.create()
 
-        rows = self.manager.from_table("test_items").find_records()
+        rows = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .order_by_asc(["name"])
+            .find_records(is_dict_cursor=True)
+        )
         self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["name"], "a")
+        self.assertEqual(rows[0]["score"], 1)
+        self.assertEqual(rows[1]["name"], "b")
+        self.assertEqual(rows[1]["score"], 2)
 
     # ---- where 系（=, >, >=, <, <=, LIKE, IS NULL, IS NOT NULL）----
     def test_where_variants(self):
+        """
+        where 系 API がすべて正しく機能することを確認する。
+
+        対象:
+        - where (=)
+        - where_gt / gte / lt / lte
+        - where_like
+        - where_is_null / where_is_not_null
+        - where_in / where_not_in
+        """
         self.manager.from_table("test_items").sets([
             {"name": "x", "score": 10, "note": None},
             {"name": "y", "score": 20, "note": "memo"},
             {"name": "z", "score": 30, "note": "memo"},
         ]).create()
 
-        rows = self.manager.from_table("test_items").where_gt("score", 10).find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_gt("score", 10).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"y", "z"})
 
-        rows = self.manager.from_table("test_items").where_gte("score", 20).find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_gte("score", 20).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"y", "z"})
 
-        rows = self.manager.from_table("test_items").where_lt("score", 30).find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_lt("score", 30).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"x", "y"})
 
-        rows = self.manager.from_table("test_items").where_lte("score", 20).find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_lte("score", 20).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"x", "y"})
 
-        rows = self.manager.from_table("test_items").where_like("name", "y").find_records()
-        self.assertEqual(len(rows), 1)
+        rows = self.manager.from_table("test_items").where_like("name", "y").find_records(is_dict_cursor=True)
+        self.assertEqual([r["name"] for r in rows], ["y"])
 
-        rows = self.manager.from_table("test_items").where_is_null("note").find_records()
-        self.assertEqual(len(rows), 1)
+        rows = self.manager.from_table("test_items").where_is_null("note").find_records(is_dict_cursor=True)
+        self.assertEqual([r["name"] for r in rows], ["x"])
 
-        rows = self.manager.from_table("test_items").where_is_not_null("note").find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_is_not_null("note").find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"y", "z"})
 
-        rows = self.manager.from_table("test_items").where_in("score", [10, 20]).find_records()
-        self.assertEqual(len(rows), 2)
+        rows = self.manager.from_table("test_items").where_in("score", [10, 20]).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"x", "y"})
 
-        rows = self.manager.from_table("test_items").where_not_in("score", [10, 20]).find_records()
-        self.assertEqual(len(rows), 1)
-
+        rows = self.manager.from_table("test_items").where_not_in("score", [10, 20]).find_records(is_dict_cursor=True)
+        self.assertEqual({r["name"] for r in rows}, {"z"})
 
     # ---- select / order_by / group_by ----
     def test_select_and_alias(self):
+        """
+        select() でカラム指定とエイリアス指定ができ、
+        order_by_asc() により並び順が制御できることを確認する。
+        """
         self.manager.from_table("test_items").sets([
             {"name": "a", "score": 1},
             {"name": "b", "score": 2},
@@ -166,6 +194,12 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         self.assertEqual(rows[0]["s"], 1)
 
     def test_group_by_functionality(self):
+        """
+        group_by() により GROUP BY 集計が正しく行われることを確認する。
+
+        - COUNT(*) の集計結果が正しいこと
+        - ORDER BY 未指定時は結果順に依存せず検証する
+        """
         self.manager.from_table("test_items").sets([
             {"name": "a", "score": 10},
             {"name": "a", "score": 20},
@@ -181,12 +215,49 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             .find_records(is_dict_cursor=True)
         )
 
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["name"], "a")
-        self.assertEqual(rows[0]["cnt"], 2)
-        self.assertEqual(rows[1]["name"], "b")
+        by_name = {r["name"]: r["cnt"] for r in rows}
+        self.assertEqual(by_name, {"a": 2, "b": 1})
+
+    def test_group_by_accepts_list_and_comma_separated(self):
+        """
+        group_by() が以下の指定形式を受け付けることを確認する。
+
+        - list 形式: group_by(["name"])
+        - カンマ区切り文字列: group_by("name, score")
+        """
+        self.manager.from_table("test_items").sets([
+            {"name": "a", "score": 10},
+            {"name": "a", "score": 20},
+            {"name": "b", "score": 30},
+            {"name": "b", "score": 40},
+        ]).create()
+
+        rows1 = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("COUNT(*)", "cnt")
+            .group_by(["name"])
+            .find_records(is_dict_cursor=True)
+        )
+        by_name1 = {r["name"]: r["cnt"] for r in rows1}
+        self.assertEqual(by_name1, {"a": 2, "b": 2})
+
+        rows2 = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("COUNT(*)", "cnt")
+            .group_by("name, score")
+            .find_records(is_dict_cursor=True)
+        )
+        self.assertTrue(all(r["cnt"] == 1 for r in rows2))
 
     def test_order_by_desc(self):
+        """
+        order_by_desc() により降順ソートが正しく行われることを確認する。
+        """
         self.manager.from_table("test_items").sets([
             {"name": "a", "score": 1},
             {"name": "b", "score": 2},
@@ -202,23 +273,85 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
 
     # ---- update / delete / count ----
     def test_update(self):
-        self.manager.from_table("test_items").set("name", "u").set("score", 1).create()
-        self.manager.from_table("test_items").set("score", 99).where("name", "u").update()
-
-        rows = self.manager.from_table("test_items").where("score", 99).find_records()
-        self.assertEqual(len(rows), 1)
-
-    def test_delete(self):
+        """
+        where 条件付き update() により
+        対象レコードのみが更新され、更新していない列が変わらないことも確認する。
+        """
+        # 対象行と対象外行を用意し、更新対象の列以外が変わらないことを確認する
         self.manager.from_table("test_items").sets([
-            {"name": "a", "score": 1},
-            {"name": "b", "score": 2},
+            {"name": "u1", "score": 1, "note": "keep"},
+            {"name": "u2", "score": 2, "note": "keep2"},
         ]).create()
 
-        self.manager.from_table("test_items").where("name", "a").delete()
-        rows = self.manager.from_table("test_items").find_records()
-        self.assertEqual(len(rows), 1)
+        # u1 の score のみ更新
+        self.manager.from_table("test_items").set("score", 99).where("name", "u1").update()
+
+        u1 = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("note")
+            .where("name", "u1")
+            .find_records(is_dict_cursor=True)
+        )[0]
+        u2 = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("note")
+            .where("name", "u2")
+            .find_records(is_dict_cursor=True)
+        )[0]
+
+        # 対象行: score が更新され、note は不変
+        self.assertEqual(u1["name"], "u1")
+        self.assertEqual(u1["score"], 99)
+        self.assertEqual(u1["note"], "keep")
+
+        # 対象外行: 全て不変
+        self.assertEqual(u2["name"], "u2")
+        self.assertEqual(u2["score"], 2)
+        self.assertEqual(u2["note"], "keep2")
+
+    def test_delete(self):
+        """
+        where 条件付き delete() により
+        対象データだけ削除できており、他データが消えていないことを確認する。
+        """
+        self.manager.from_table("test_items").sets([
+            {"name": "del_a", "score": 1, "note": "A"},
+            {"name": "del_b", "score": 2, "note": "B"},
+        ]).create()
+
+        # del_a だけ削除
+        self.manager.from_table("test_items").where("name", "del_a").delete()
+
+        # del_a は無い
+        rows_a = self.manager.from_table("test_items").where("name", "del_a").find_records()
+        self.assertEqual(len(rows_a), 0)
+
+        # del_b は残っていて内容も変わらない
+        rows_b = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .select("note")
+            .where("name", "del_b")
+            .find_records(is_dict_cursor=True)
+        )
+        self.assertEqual(len(rows_b), 1)
+        self.assertEqual(rows_b[0]["name"], "del_b")
+        self.assertEqual(rows_b[0]["score"], 2)
+        self.assertEqual(rows_b[0]["note"], "B")
 
     def test_count(self):
+        """
+        count() がテーブル内のレコード件数を
+        正しく返すことを確認する。
+        """
         self.manager.from_table("test_items").sets([
             {"name": "a", "score": 1},
             {"name": "b", "score": 2},
@@ -229,6 +362,10 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
 
     # ---- transaction: begin_transaction / end_transaction ----
     def test_transaction_commit(self):
+        """
+        begin_transaction → end_transaction(True) により
+        INSERT が commit され、内容が残っていることを確認する。
+        """
         self.manager.begin_transaction()
         try:
             self.manager.from_table("test_items").set("name", "tx").set("score", 1).create()
@@ -237,10 +374,23 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             self.manager.end_transaction(is_succeed=False)
             raise
 
-        rows = self.manager.from_table("test_items").where("name", "tx").find_records()
+        rows = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select("score")
+            .where("name", "tx")
+            .find_records(is_dict_cursor=True)
+        )
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "tx")
+        self.assertEqual(rows[0]["score"], 1)
 
     def test_transaction_rollback(self):
+        """
+        begin_transaction → end_transaction(False) により
+        INSERT が rollback され、データが残っていないことを確認する。
+        """
         self.manager.begin_transaction()
         try:
             self.manager.from_table("test_items").set("name", "tx").set("score", 1).create()
@@ -253,6 +403,10 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
 
     # ---- last query APIs ----
     def test_get_last_query_and_parameters_and_info(self):
+        """
+        get_last_query / get_last_parameters / get_last_query_info が
+        直近で実行された SQL 情報を正しく保持していることを確認する。
+        """
         self.manager.from_table("test_items").set("name", "last").set("score", 1).create()
 
         q = self.manager.get_last_query()
