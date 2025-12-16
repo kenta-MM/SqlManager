@@ -1,3 +1,3 @@
 pymysql>=1.0
 python-dotenv
-mysqldb
+mysqlclient
