@@ -35,3 +35,7 @@ class TestSqlManagerMySQL(unittest.TestCase):
             .find_records()
 
         self.assertEqual(len(rows), 1)
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()
