@@ -32,6 +32,7 @@ class SqlManager:
             'db': settings['db']
         }
         self.__driver = settings.get('driver', 'mysqldb').lower()
+
         self.__table = ''
         self.__where_list = []
         self.__where_condition_list = []
@@ -146,6 +147,8 @@ class SqlManager:
         """
         self._add_wheres(column, value, 'IN')
 
+        return self
+
     def where_not_in(self, column: str, value: list) -> 'SqlManager':
         """
         where句
@@ -166,6 +169,8 @@ class SqlManager:
         """
         self._add_wheres(column, value, 'NOT IN')
 
+        return self
+
     def where_gt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
         """
         where句(>)
@@ -183,6 +188,8 @@ class SqlManager:
                 自身のインスタンス
         """
         self._add_wheres(column, value, '>')
+
+        return self
 
     def where_gte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
         """
@@ -202,6 +209,8 @@ class SqlManager:
         """
         self._add_wheres(column, value, '>=')
 
+        return self
+
     def where_lt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
         """
         where句(<)
@@ -219,6 +228,8 @@ class SqlManager:
                 自身のインスタンス
         """
         self._add_wheres(column, value, '<')
+
+        return self
 
     def where_lte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
         """
@@ -238,6 +249,8 @@ class SqlManager:
         """
         self._add_wheres(column, value, '<=')
 
+        return self
+
     def where_like(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
         """
         where句(LIKE)
@@ -256,6 +269,8 @@ class SqlManager:
         """
         self._add_wheres(column, value, 'LIKE')
 
+        return self
+
     def where_is_null(self, column: str) -> 'SqlManager':
         """
         where句(IS NULL)
@@ -271,6 +286,8 @@ class SqlManager:
                 自身のインスタンス
         """
         self._add_wheres(column, None, 'IS NULL')
+
+        return self
 
     def where_is_not_null(self, column: str) -> 'SqlManager':
         """
@@ -289,6 +306,8 @@ class SqlManager:
                 自身のインスタンス
         """
         self._add_wheres(column, None, 'IS NOT NULL')
+
+        return self
 
     def select(self, column: str, as_column: str = None) -> 'SqlManager':
         """
@@ -441,6 +460,8 @@ class SqlManager:
                 自身のインスタンス            
         """
         self.__group_by = " GROUP BY " + (column if type(column) is str else ', '.join(column) + ' ')
+
+        return self
 
     def update(self) -> None:
         """
@@ -779,15 +800,16 @@ class SqlManager:
                 autocommit=setting['autocommit'] if 'autocommit' in setting else True
             )
         # mysqldbがないので現在使えない
-        # else self.__driver == 'mysqldb':
-        #     import MySQLdb
-        #     if 'charset' in setting:
-        #     return MySQLdb.connect(
-        #         user=setting['user'],
-        #         passwd=setting['passwd'],
-        #         host=setting['host'],
-        #         db=setting['db']
-        #     )
+        elif self.__driver == 'mysqldb':
+            import MySQLdb
+            return MySQLdb.connect(
+                user=setting['user'],
+                passwd=setting['passwd'],
+                host=setting['host'],
+                db=setting['db'],
+                charset=setting['charset'] if 'charset' in setting else 'utf8mb4',
+                autocommit=setting['autocommit'] if 'autocommit' in setting else True
+            )
         else:
             return ValueError(f"Unsupported driver: {self.__driver}")
 
