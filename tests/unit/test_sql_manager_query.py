@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from sql_manager import SqlManager
 
@@ -27,13 +27,15 @@ class TestSqlManagerQuery(unittest.TestCase):
         Returns:
             tuple: (SqlManagerインスタンス, モックコネクション, モックカーソル)
         """
-        manager = SqlManager({
-            'user': 'user',
-            'passwd': 'passwd',
-            'host': 'localhost',
-            'db': 'test_db',
-            'driver': 'pymysql'
-        })
+        fake_driver = self._fake_driver_module()
+        with patch.object(SqlManager, "_load_driver", return_value=("pymysql", fake_driver)):
+            manager = SqlManager({
+                'user': 'user',
+                'passwd': 'passwd',
+                'host': 'localhost',
+                'db': 'test_db',
+                'driver': 'pymysql'
+            })
 
         cursor_mock = MagicMock()
         cursor_mock.execute.return_value = None
@@ -46,6 +48,24 @@ class TestSqlManagerQuery(unittest.TestCase):
         manager._connect = MagicMock(return_value=connection_mock)
 
         return manager, connection_mock, cursor_mock
+
+    def _fake_driver_module(self):
+        """テスト用の疑似ドライバーを生成する。"""
+
+        class DummyCursor:
+            ...
+
+        class DummyCursors:
+            DictCursor = DummyCursor
+
+        class DummyDriver:
+            cursors = DummyCursors()
+
+            @staticmethod
+            def connect(**_kwargs):
+                return MagicMock()
+
+        return DummyDriver()
 
     def assert_last_query(self, expected_query, expected_params, manager=None, cursor=None):
         """

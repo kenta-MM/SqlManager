@@ -1,8 +1,10 @@
+import datetime
 import re
 from enum import Enum
-from typing import Union, Optional, Sequence, Any, Tuple
-import datetime
 from functools import singledispatchmethod
+from importlib import import_module, util
+from types import ModuleType
+from typing import Any, Optional, Sequence, Tuple, Union
 
 class ExecuteQueryType(Enum):
     SELECT = 1
@@ -14,6 +16,17 @@ class ExecuteQueryType(Enum):
 
 class SqlManager:
 
+    _DRIVER_MODULES = {
+        "pymysql": "pymysql",
+        "mysqldb": "MySQLdb",
+        "mysqlclient": "MySQLdb",
+    }
+
+    _DEFAULT_CONNECTION_OPTIONS = {
+        "charset": "utf8mb4",
+        "autocommit": True,
+    }
+
     def __init__(self, settings: dict) -> None:
         """
         コンストラクタ
@@ -23,13 +36,15 @@ class SqlManager:
             settings: dict
                 接続情報
         """
-        self.__default_setting = {
-            'user': settings['user'],
-            'passwd': settings['passwd'],
-            'host': settings['host'],
-            'db': settings['db']
-        }
-        self.__driver = settings.get('driver', 'mysqldb').lower()
+        self.__settings = dict(self._DEFAULT_CONNECTION_OPTIONS)
+        self.__settings.update(settings)
+
+        required_keys = ("user", "passwd", "host", "db")
+        missing_keys = [key for key in required_keys if key not in self.__settings]
+        if missing_keys:
+            raise ValueError(f"Missing required connection settings: {', '.join(missing_keys)}")
+
+        self.__driver_name, self.__driver_module = self._load_driver(self.__settings.get("driver"))
 
         self.__table = ''
         self.__where_list = []
@@ -52,18 +67,26 @@ class SqlManager:
         """
         デストラクタ
         """
-        del self.__table
-        del self.__where_list
-        del self.__where_condition_list
-        del self.__holder_value_list
-        del self.__select
-        del self.__insert_or_update_list
-        del self.__order_by_list
-        del self.__group_by_columns
-        del self.__enable_transaction
-        del self.__connection
-        del self.__last_query
-        del self.__last_parameters
+        managed_attrs = (
+            "_SqlManager__table",
+            "_SqlManager__where_list",
+            "_SqlManager__where_condition_list",
+            "_SqlManager__holder_value_list",
+            "_SqlManager__select",
+            "_SqlManager__insert_or_update_list",
+            "_SqlManager__order_by_list",
+            "_SqlManager__group_by_columns",
+            "_SqlManager__enable_transaction",
+            "_SqlManager__connection",
+            "_SqlManager__last_query",
+            "_SqlManager__last_parameters",
+            "_SqlManager__settings",
+            "_SqlManager__driver_name",
+            "_SqlManager__driver_module",
+        )
+        for attr in managed_attrs:
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     def begin_transaction(self) -> None:
         """
@@ -807,7 +830,7 @@ class SqlManager:
         
         return query
 
-    def _query_build(self, ExecuteQueryType: ExecuteQueryType) -> str:
+    def _query_build(self, execute_query_type: ExecuteQueryType) -> str:
         """
         クエリを組み立てる
 
@@ -819,7 +842,7 @@ class SqlManager:
 
         query = ""
 
-        if ExecuteQueryType == ExecuteQueryType.SELECT:
+        if execute_query_type == ExecuteQueryType.SELECT:
             if len(self.__select) == 0:
                 self.__select.append("*")
             query = "SELECT {} FROM {}".format(
@@ -828,20 +851,20 @@ class SqlManager:
             query += self._query_group_by_build()
             query += self._query_order_build()
 
-        elif ExecuteQueryType == ExecuteQueryType.INSERT:
+        elif execute_query_type == ExecuteQueryType.INSERT:
             query = f"INSERT INTO {self.__table}"
             query += self._query_insert_build()
     
-        elif ExecuteQueryType == ExecuteQueryType.DELETE:
+        elif execute_query_type == ExecuteQueryType.DELETE:
             query = f"DELETE FROM {self.__table}"
             query += self._query_where_build()
 
-        elif ExecuteQueryType == ExecuteQueryType.UPDATE:
+        elif execute_query_type == ExecuteQueryType.UPDATE:
             query = f"UPDATE {self.__table} SET "
             query += self._query_update_build()
             query += self._query_where_build()
         
-        elif ExecuteQueryType == ExecuteQueryType.COUNT:
+        elif execute_query_type == ExecuteQueryType.COUNT:
             query = f"SELECT COUNT(*) FROM {self.__table} "
             query += self._query_where_build()
             query += self._query_group_by_build()
@@ -869,33 +892,51 @@ class SqlManager:
             MySQLdb : MySQLdb.connect
                 MySQLdbインスタンス
         """
-        setting = self.__default_setting
+        charset = self.__settings.get("charset", "utf8mb4")
+        autocommit = self.__settings.get("autocommit", True)
 
-        if self.__driver == 'pymysql':
-            import pymysql
-            return pymysql.connect(
-                user=setting['user'],
-                passwd=setting['passwd'],
-                host=setting['host'],
-                db=setting['db'],
-                charset=setting['charset'] if 'charset' in setting else 'utf8mb4',
-                autocommit=setting['autocommit'] if 'autocommit' in setting else True
-            )
-        # mysqldbがないので現在使えない
-        elif self.__driver == 'mysqldb':
-            import MySQLdb
-            return MySQLdb.connect(
-                user=setting['user'],
-                passwd=setting['passwd'],
-                host=setting['host'],
-                db=setting['db'],
-                charset=setting['charset'] if 'charset' in setting else 'utf8mb4',
-                autocommit=setting['autocommit'] if 'autocommit' in setting else True
-            )
-        else:
-            raise ValueError(f"Unsupported driver: {self.__driver}")
+        connection_options = {
+            "user": self.__settings["user"],
+            "passwd": self.__settings["passwd"],
+            "host": self.__settings["host"],
+            "db": self.__settings["db"],
+            "charset": charset,
+            "autocommit": autocommit,
+        }
 
-    def _add_wheres(self, column: str, value: Any, condtion: str) -> None:
+        return self.__driver_module.connect(**connection_options)
+
+    def _load_driver(self, driver: Optional[str]) -> tuple[str, ModuleType]:
+        """
+        利用するドライバーを読み込む。
+
+        指定がある場合は該当ドライバーを読み込み、失敗した場合は例外を送出する。
+        指定がない場合は環境で利用可能なドライバーを優先順位に従って選択する。
+        """
+
+        if driver is not None:
+            normalized_driver = driver.lower()
+            module_name = self._DRIVER_MODULES.get(normalized_driver)
+            if module_name is None:
+                raise ValueError(f"Unsupported driver: {driver}")
+
+            if util.find_spec(module_name) is None:
+                raise ImportError(f"Driver '{driver}' could not be loaded.")
+
+            module = import_module(module_name)
+            canonical_name = "mysqldb" if normalized_driver == "mysqlclient" else normalized_driver
+            return canonical_name, module
+
+        for candidate in ("pymysql", "mysqldb"):
+            module_name = self._DRIVER_MODULES[candidate]
+            if util.find_spec(module_name) is None:
+                continue
+            module = import_module(module_name)
+            return candidate, module
+
+        raise ImportError("No supported MySQL driver is available in the current environment.")
+
+    def _add_wheres(self, column: str, value: Any, condition: str) -> None:
         """
         whereリストに値、カラム、条件を追加する
 
@@ -909,7 +950,7 @@ class SqlManager:
                 条件
         """
         self.__where_list.append({column: value})
-        self.__where_condition_list.append({column: condtion})
+        self.__where_condition_list.append({column: condition})
 
     def _is_use_aggregate_functions(self, column: str) -> bool:
         """
@@ -958,9 +999,5 @@ class SqlManager:
 
     def _get_cursor(self, conn, is_dict_cursor):
         if is_dict_cursor:
-            if self.__driver == "pymysql":
-                from pymysql.cursors import DictCursor
-            else:
-                from MySQLdb.cursors import DictCursor
-            return conn.cursor(DictCursor)
+            return conn.cursor(self.__driver_module.cursors.DictCursor)
         return conn.cursor()
