@@ -15,6 +15,8 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
     - SQL の結果そのものではなく「振る舞い」を保証する
     """
 
+    DRIVER = None
+
     @classmethod
     def setUpClass(cls):
         """
@@ -23,12 +25,20 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         """
         load_dotenv()
 
-        cls.manager = SqlManager(settings={
+        settings = {
             "host": os.getenv("DB_HOST"),
             "user": os.getenv("DB_USER"),
             "passwd": os.getenv("DB_PASSWORD"),
             "db": os.getenv("DB_NAME"),
-        })
+        }
+
+        if cls.DRIVER:
+            settings["driver"] = cls.DRIVER
+
+        try:
+            cls.manager = SqlManager(settings=settings)
+        except ImportError as exc:
+            raise unittest.SkipTest(f"{cls.__name__} はドライバ {cls.DRIVER!r} を利用できないためスキップします: {exc}") from exc
 
         cls.manager.raw_execute(
             """
@@ -422,6 +432,14 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         _ = self.manager.from_table("test_items").where("name", "last").find_records()
         q2 = self.manager.get_last_query()
         self.assertTrue(q2.upper().startswith("SELECT"))
+
+
+class TestSqlManagerMySQL_PyMySQL(TestSqlManagerMySQL_AllPublic):
+    DRIVER = "pymysql"
+
+
+class TestSqlManagerMySQL_MySQLDB(TestSqlManagerMySQL_AllPublic):
+    DRIVER = "mysqldb"
 
 
 if __name__ == "__main__":
