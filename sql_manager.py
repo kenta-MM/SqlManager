@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import re
 from enum import Enum
@@ -19,7 +21,6 @@ class SqlManager:
     _DRIVER_MODULES = {
         "pymysql": "pymysql",
         "mysqldb": "MySQLdb",
-        "mysqlclient": "MySQLdb",
     }
 
     _DEFAULT_CONNECTION_OPTIONS = {
@@ -44,7 +45,7 @@ class SqlManager:
         if missing_keys:
             raise ValueError(f"Missing required connection settings: {', '.join(missing_keys)}")
 
-        self.__driver_name, self.__driver_module = self._load_driver(self.__settings.get("driver"))
+        self.__driver_module = self.__load_driver(self.__settings.get("driver"))
 
         self.__table = ''
         self.__where_list = []
@@ -906,7 +907,7 @@ class SqlManager:
 
         return self.__driver_module.connect(**connection_options)
 
-    def _load_driver(self, driver: Optional[str]) -> tuple[str, ModuleType]:
+    def __load_driver(self, driver: Optional[str]) -> ModuleType:
         """
         利用するドライバーを読み込む。
 
@@ -923,16 +924,13 @@ class SqlManager:
             if util.find_spec(module_name) is None:
                 raise ImportError(f"Driver '{driver}' could not be loaded.")
 
-            module = import_module(module_name)
-            canonical_name = "mysqldb" if normalized_driver == "mysqlclient" else normalized_driver
-            return canonical_name, module
+            return import_module(module_name)
 
         for candidate in ("pymysql", "mysqldb"):
             module_name = self._DRIVER_MODULES[candidate]
             if util.find_spec(module_name) is None:
                 continue
-            module = import_module(module_name)
-            return candidate, module
+            return import_module(module_name)
 
         raise ImportError("No supported MySQL driver is available in the current environment.")
 
