@@ -2,7 +2,7 @@
 import os
 import unittest
 from dotenv import load_dotenv
-from sql_manager import SqlManager
+from sql_manager import SqlManager, SqlExpr
 
 
 class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
@@ -220,7 +220,7 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             self.manager
             .from_table("test_items")
             .select("name")
-            .select("COUNT(*)", "cnt")
+            .select(SqlExpr("COUNT(*)"), "cnt")
             .group_by("name")
             .find_records(is_dict_cursor=True)
         )
@@ -246,7 +246,7 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             self.manager
             .from_table("test_items")
             .select("name")
-            .select("COUNT(*)", "cnt")
+            .select(SqlExpr("COUNT(*)"), "cnt")
             .group_by(["name"])
             .find_records(is_dict_cursor=True)
         )
@@ -258,7 +258,7 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             .from_table("test_items")
             .select("name")
             .select("score")
-            .select("COUNT(*)", "cnt")
+            .select(SqlExpr("COUNT(*)"), "cnt")
             .group_by("name, score")
             .find_records(is_dict_cursor=True)
         )

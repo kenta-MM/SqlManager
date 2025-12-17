@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import datetime
 import re
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from enum import Enum
-from functools import singledispatchmethod
 from importlib import import_module, util
 from types import ModuleType
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Iterable, Optional, Sequence, Tuple, Union, List, Dict
+
 
 class ExecuteQueryType(Enum):
+    """
+    実行するSQLの種類を表す列挙型。
+
+    内部的にクエリ構築・実行処理の分岐に利用される。
+    """    
     SELECT = 1
     INSERT = 2
     UPDATE = 3
@@ -16,916 +23,557 @@ class ExecuteQueryType(Enum):
     COUNT = 5
 
 
+@dataclass(frozen=True)
+class SqlExpr:
+    """
+    信頼できる生SQL式（RAW SQL）を表すラッパークラス。
+
+    通常、select / group_by / order_by では
+    カラム名を安全にクオートするが、
+    COUNT(*), SUM(x) などのSQL関数は識別子ではないため
+    本クラスで明示的に包んで指定する。
+
+    例:
+    select(SqlExpr("COUNT(*)"), "cnt")
+    """
+    sql: str
+
+
+@dataclass
+class _WhereClause:
+    """
+    WHERE句の1条件を表す内部用データクラス。
+
+    ユーザーから直接参照されることは想定していない。
+    """    
+    column: str
+    op: str
+    value: Any = None
+
+
+@dataclass
+class QueryState:
+    """
+    1クエリ分の状態を保持する内部ステートクラス。
+
+    fluent interface（from_table().where().select()...）で
+    構築された情報を一時的に保持し、
+    SQL生成後に必ず reset() される。
+    """    
+    table: Optional[str] = None
+    selects: List[Union[str, SqlExpr]] = field(default_factory=list)
+    wheres: List[_WhereClause] = field(default_factory=list)
+    group_by: List[Union[str, SqlExpr]] = field(default_factory=list)
+    order_by: List[Tuple[Union[str, SqlExpr], str]] = field(default_factory=list)
+    # insert/update payload
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+
+    def reset(self) -> None:
+        """内部状態を初期化する（次のクエリ用）。"""
+        self.table = None
+        self.selects.clear()
+        self.wheres.clear()
+        self.group_by.clear()
+        self.order_by.clear()
+        self.rows.clear()
+
+
+@dataclass(frozen=True)
+class ConnectionSettings:
+    """
+    データベース接続設定をまとめた不変データクラス。
+
+    SqlManager 初期化時に dict から生成され、
+    以降は変更されない。
+    """
+    user: str
+    passwd: str
+    host: str
+    db: str
+    driver: Optional[str] = None
+    charset: str = "utf8mb4"
+    autocommit: bool = True
+
+
 class SqlManager:
+    """
+    MySQL向けの軽量SQLビルダー兼実行クラス。
+
+    特徴:
+    - fluent interface による直感的なSQL構築
+    - プレースホルダによる安全な値バインド
+    - 識別子（テーブル名・カラム名）の検証とクオート
+    - トランザクション管理対応
+
+    対応ドライバ:
+    - pymysql
+    - MySQLdb (mysqlclient)
+
+    複雑なSQL（JOIN, サブクエリ等）は raw_execute() を使用する。
+    """
 
     _DRIVER_MODULES = {
         "pymysql": "pymysql",
         "mysqldb": "MySQLdb",
     }
 
-    _DEFAULT_CONNECTION_OPTIONS = {
-        "charset": "utf8mb4",
-        "autocommit": True,
-    }
+    _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
     def __init__(self, settings: dict) -> None:
         """
-        コンストラクタ
+        SqlManager を初期化する。
 
-        Parameters
-        ----------
-            settings: dict
-                接続情報
+        Args:
+            settings (dict): DB接続設定。
+                必須キー: user, passwd, host, db
+
+                任意キー: driver, charset, autocommit
+
+            Raises:
+                ValueError: 必須キーが不足している場合
+                ImportError: 利用可能なDBドライバが存在しない場合
         """
-        self.__settings = dict(self._DEFAULT_CONNECTION_OPTIONS)
-        self.__settings.update(settings)
-
         required_keys = ("user", "passwd", "host", "db")
-        missing_keys = [key for key in required_keys if key not in self.__settings]
-        if missing_keys:
-            raise ValueError(f"Missing required connection settings: {', '.join(missing_keys)}")
+        missing = [k for k in required_keys if k not in settings]
+        if missing:
+            raise ValueError(f"Missing required connection settings: {', '.join(missing)}")
 
-        self.__driver_module = self.__load_driver(self.__settings.get("driver"))
-
-        self.__table = ''
-        self.__where_list = []
-        self.__where_condition_list = []
-        self.__holder_value_list = {
-            'insert' : [],
-            'update' : [],
-            'where' : []
-        }
-        self.__select = []
-        self.__insert_or_update_list = []
-        self.__order_by_list = []
-        self.__group_by_columns = []
-        self.__enable_transaction = False
-        self.__connection = None
-        self.__last_query = ''
-        self.__last_parameters = None
-
-    def __del__(self) -> None:
-        """
-        デストラクタ
-        """
-        managed_attrs = (
-            "_SqlManager__table",
-            "_SqlManager__where_list",
-            "_SqlManager__where_condition_list",
-            "_SqlManager__holder_value_list",
-            "_SqlManager__select",
-            "_SqlManager__insert_or_update_list",
-            "_SqlManager__order_by_list",
-            "_SqlManager__group_by_columns",
-            "_SqlManager__enable_transaction",
-            "_SqlManager__connection",
-            "_SqlManager__last_query",
-            "_SqlManager__last_parameters",
-            "_SqlManager__settings",
-            "_SqlManager__driver_name",
-            "_SqlManager__driver_module",
+        self._settings = ConnectionSettings(
+            user=settings["user"],
+            passwd=settings["passwd"],
+            host=settings["host"],
+            db=settings["db"],
+            driver=settings.get("driver"),
+            charset=settings.get("charset", "utf8mb4"),
+            autocommit=settings.get("autocommit", True),
         )
-        for attr in managed_attrs:
-            if hasattr(self, attr):
-                delattr(self, attr)
 
+        # 指定または自動選択されたDBドライバモジュール
+        self._driver_module: ModuleType = self._load_driver(self._settings.driver)
+
+        self._state = QueryState()
+
+        # トランザクション管理用
+        self._in_tx = False
+        self._tx_conn = None
+
+        # 最後に実行したクエリ情報（デバッグ・テスト用）
+        self._last_query: str = ""
+        self._last_params: Optional[Tuple[Any, ...]] = None
+
+    # ----------------------------
+    # Transaction API (compatible)
+    # ----------------------------
     def begin_transaction(self) -> None:
-        """
-        トランザクション開始
-        """
-        self.__enable_transaction = True
+        self._in_tx = True
 
     def end_transaction(self, is_succeed: bool) -> None:
+        if not self._tx_conn:
+            # Nothing to close/commit
+            self._in_tx = False
+            return
+
+        try:
+            if is_succeed:
+                self._tx_conn.commit()
+            else:
+                self._tx_conn.rollback()
+        finally:
+            try:
+                self._tx_conn.close()
+            finally:
+                self._tx_conn = None
+                self._in_tx = False
+
+    @contextmanager
+    def transaction(self):
         """
-        トランザクション終了
-
-        Parameters
-        ----------
-            is_succeed : bool
-                処理が成功したのならばコミットする。
-                してなければrollbackする。
+        Usage:
+            with manager.transaction():
+                manager.from_table(...).set(...).create()
         """
-        self.__enable_transaction = False
-        self.__connection.commit() if is_succeed else self.__connection.rollback()
-        self.__connection.close()
-        self.__connection = None
+        self.begin_transaction()
+        ok = False
+        try:
+            yield self
+            ok = True
+        finally:
+            self.end_transaction(ok)
 
-    def from_table(self, table: str) -> 'SqlManager':
-        """
-        使用するテーブルを指定する
-
-        Parameters
-        ----------
-        table : str
-            操作するテーブル名
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-
-        self.__table = table
-
+    # ----------------------------
+    # Fluent builder
+    # ----------------------------
+    def from_table(self, table: str) -> "SqlManager":
+        self._state.table = table
         return self
 
-    def where(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句
+    # Where variants
+    def where(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> "SqlManager":
+        return self._add_where(column, "=", value)
 
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
+    def where_gt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> "SqlManager":
+        return self._add_where(column, ">", value)
 
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, '=')
+    def where_gte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> "SqlManager":
+        return self._add_where(column, ">=", value)
 
-        return self
+    def where_lt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> "SqlManager":
+        return self._add_where(column, "<", value)
 
-    def where_in(self, column: str, value: list) -> 'SqlManager':
-        """
-        where句
+    def where_lte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> "SqlManager":
+        return self._add_where(column, "<=", value)
 
-        IN句を利用
+    def where_like(self, column: str, value: Union[str, int]) -> "SqlManager":
+        return self._add_where(column, "LIKE", value)
 
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : list
-            where句で使用する値
+    def where_in(self, column: str, values: list) -> "SqlManager":
+        return self._add_where(column, "IN", values)
 
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, 'IN')
+    def where_not_in(self, column: str, values: list) -> "SqlManager":
+        return self._add_where(column, "NOT IN", values)
 
-        return self
+    def where_is_null(self, column: str) -> "SqlManager":
+        return self._add_where(column, "IS NULL", None)
 
-    def where_not_in(self, column: str, value: list) -> 'SqlManager':
-        """
-        where句
+    def where_is_not_null(self, column: str) -> "SqlManager":
+        return self._add_where(column, "IS NOT NULL", None)
 
-        IN句を利用
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : list
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, 'NOT IN')
-
-        return self
-
-    def where_gt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句(>)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, '>')
-
-        return self
-
-    def where_gte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句(>=)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, '>=')
-
-        return self
-
-    def where_lt(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句(<)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, '<')
-
-        return self
-
-    def where_lte(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句(<=)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, '<=')
-
-        return self
-
-    def where_like(self, column: str, value: Union[int, str, datetime.date, datetime.datetime]) -> 'SqlManager':
-        """
-        where句(LIKE)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, value, 'LIKE')
-
-        return self
-
-    def where_is_null(self, column: str) -> 'SqlManager':
-        """
-        where句(IS NULL)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, None, 'IS NULL')
-
-        return self
-
-    def where_is_not_null(self, column: str) -> 'SqlManager':
-        """
-        where句(IS NOT NULL)
-
-        Parameters
-        ----------
-        column : str
-            where句の対象となるカラム名
-        value : Union[int, str, datetime.date, datetime.datetime]
-            where句で使用する値
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        self._add_wheres(column, None, 'IS NOT NULL')
-
-        return self
-
-    def select(self, column: str, as_column: str = None) -> 'SqlManager':
-        """
-        取得するカラムを指定する
-
-        Parameters
-        ----------
-        column : str
-            取得するカラム名
-        as_column : str
-            取得するカラム名の別名
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス            
-        """
-
-        query_select = f"{format(column)}" if self._is_use_aggregate_functions(column) else f"`{format(column)}`"
-
-        if as_column is not None:
-            query_select += f" AS {format(as_column)}"
-
-        self.__select.append(query_select)
-
-        return self
-
-    @singledispatchmethod
-    def set(self, column: str, value: Any) -> 'SqlManager':
-        """
-        １レコードの挿入、更新
-
-        Paramters
-        ---------
-            column : str
-                挿入、更新するカラム
-            value : Any
-                挿入、更新するカラムのデータ
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        if len(self.__insert_or_update_list) > 0:
-            self.__insert_or_update_list[0].update({column: value})
+    def select(self, column: Union[str, SqlExpr], as_column: Optional[str] = None) -> "SqlManager":
+        if isinstance(column, SqlExpr):
+            sel = column.sql
         else:
-            self.__insert_or_update_list.append({column: value})
-
+            sel = self._quote_identifier(column)
+        if as_column:
+            sel += f" AS {self._quote_identifier(as_column)}"
+        self._state.selects.append(SqlExpr(sel) if isinstance(column, SqlExpr) else sel)
         return self
 
-    @set.register
-    def arg_dict_set(self, data: dict):
+    # Insert/Update payload
+    def set(self, column: Union[str, dict], value: Any = None) -> "SqlManager":
         """
-        １レコードの挿入、更新
-
-        TODO: 戻り値を指定するとエラーになるため指定していない
-
-        Paramters
-        ---------
-            data : dict
-                挿入、更新するカラム
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
+        Compatible with:
+          - set("name", "x")
+          - set({"name": "x", "score": 1})
         """
-        if len(self.__insert_or_update_list) > 0:
-            self.__insert_or_update_list[0].update(data)
+        if isinstance(column, dict):
+            data = column
         else:
-            self.__insert_or_update_list.append(data)
+            data = {column: value}
 
+        if self._state.rows:
+            self._state.rows[0].update(data)
+        else:
+            self._state.rows.append(dict(data))
         return self
 
-    def sets(self, data: Any) -> 'SqlManager':
-        """
-        複数レコードの挿入、更新
-
-        Paramters
-        ---------
-            data : Any(List[dict] or dict)
-                List[dict]の場合 : [{"id" : 1, "name" : "test",...},...]
-                dictの場合 : {"id" : 1, "name" : "test",...}
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
-        # {カラム : 値}
+    def sets(self, data: Union[dict, List[dict]]) -> "SqlManager":
         if isinstance(data, dict):
-            self.__insert_or_update_list.append(data)
-        # [{カラム : 値}]
-        elif isinstance(data[0], dict):
-            self.__insert_or_update_list.extend(data)
+            self._state.rows.append(dict(data))
+            return self
+        if not data:
+            raise ValueError("sets() received an empty list.")
+        if not isinstance(data[0], dict):
+            raise ValueError("sets() expects dict or list[dict].")
+        self._state.rows.extend([dict(x) for x in data])
+        return self
+
+    def group_by(self, columns: Union[str, list, SqlExpr]) -> "SqlManager":
+        if isinstance(columns, SqlExpr):
+            self._state.group_by = [columns]
+            return self
+        if isinstance(columns, str):
+            cols = [c.strip() for c in columns.split(",") if c.strip()]
         else:
-            print("想定していないデータが設定されました。")
-
+            cols = [str(c).strip() for c in columns if str(c).strip()]
+        self._state.group_by = cols
         return self
 
-    def order_by_asc(self, columns: list) -> 'SqlManager':
-        """
-        Order句(昇順)
-
-        Parameters
-        ----------
-            columns: list
-                グループ対象カラム
-        
-        Returns
-        -------
-            self: SqlManager
-                自身のインスタンス
-        """
-        self.__order_by_list.append({'order' : 'ASC', 'columns' : columns})
-
+    def order_by_asc(self, columns: list) -> "SqlManager":
+        for c in columns:
+            self._state.order_by.append((c if isinstance(c, SqlExpr) else str(c), "ASC"))
         return self
 
-    def order_by_desc(self, columns: list) -> 'SqlManager':
-        """
-        Order句(降順)
-
-        Parameters
-        ----------
-            columns: list
-                グループ対象カラム
-        
-        Returns
-        -------
-            self: SqlManager
-                自身のインスタンス
-        """
-        self.__order_by_list.append({'order' : 'DESC', 'columns' : columns})
-
+    def order_by_desc(self, columns: list) -> "SqlManager":
+        for c in columns:
+            self._state.order_by.append((c if isinstance(c, SqlExpr) else str(c), "DESC"))
         return self
 
-    def group_by(self, column: Union[str, list]) -> 'SqlManager':
-        """
-        Group句
-
-        Parameters
-        ----------
-            column: Union[str, list]
-                グルーピング対象のカラム
-
-        Returns
-        -------
-            self: SqlManager
-                自身のインスタンス            
-        """
-
-        if isinstance(column, str):
-            # "a, b" のように渡された場合にも対応したいなら split する
-            cols = [c.strip() for c in column.split(",") if c.strip()]
-        else:
-            cols = [str(c).strip() for c in column if str(c).strip()]
-
-        self.__group_by_columns = cols
-
-        return self
-
-    def update(self) -> None:
-        """
-        データを更新する
-        """
-        self._execute(ExecuteQueryType.UPDATE)
-
+    # ----------------------------
+    # Execution API
+    # ----------------------------
     def create(self) -> None:
-        """
-        レコードを作成する
-
-        Returns
-        -------
-            self : SqlManager
-                自身のインスタンス
-        """
         self._execute(ExecuteQueryType.INSERT)
 
-    def count(self) -> int:
-        """
-        レコード数を取得する
-
-        Returns
-        -------
-            int(rows[0][0]) : int
-                レコード数
-        """
-        return self._execute(ExecuteQueryType.COUNT)
+    def update(self) -> None:
+        self._execute(ExecuteQueryType.UPDATE)
 
     def delete(self) -> None:
-        """
-        レコードを削除する
-        """
         self._execute(ExecuteQueryType.DELETE)
 
-    def find_records(self, is_dict_cursor:bool = False) -> Any:
-        """
-        複数データを取得する
+    def count(self) -> int:
+        return int(self._execute(ExecuteQueryType.COUNT))
 
-        Paramters
-        ---------
-            is_dict_cursor : bool
-                Dict形式で取得するかどうか(Falseの場合はlist形式)
-
-        Returns
-        -------
-            is_dict_cursor が Falseの場合 [[1, 2,...],...]
-
-            is_dict_cursor が Trueの場合  [{'key1' : 1, 'key2' : 2, ...},...]
-        """
-        return self._execute(ExecuteQueryType.SELECT, is_dict_cursor)
-
-    def _execute(self, execute_query_type: ExecuteQueryType, is_dict_cursor: Union[bool, None] = None):
-        """
-        実行クエリタイプに沿ったクエリの実行を行う。
-
-        Paramters
-        ---------
-            execute_query_type: ExecuteQueryType
-                実行クエリタイプ
-            
-            is_dict_cursor: Union[bool, None]
-                Dict形式で取得するかどうか(Falseの場合はlist形式)
-
-        Returns
-        -------
-            retValue: Any
-                execute_query_type が SELECTの場合: list
-                execute_query_type が COUNTの場合: int
-        """
-        conn = self._connect() if not self.__enable_transaction else (self.__connection or self._connect())
-        if self.__enable_transaction:
-            conn.autocommit(False)
-            self.__connection = conn
-        else:
-            conn.autocommit(True)
-
-        cur = self._get_cursor(conn, is_dict_cursor)
-        query = self._query_build(execute_query_type)
-
-        holder_value_list = None
-        if execute_query_type in [ExecuteQueryType.SELECT, ExecuteQueryType.DELETE, ExecuteQueryType.COUNT]:
-            holder_value_list = None if len(self.__holder_value_list['where']) == 0 else tuple(self.__holder_value_list['where'])
-        elif execute_query_type == ExecuteQueryType.INSERT:
-            holder_value_list = None if len(self.__holder_value_list['insert']) == 0 else tuple(self.__holder_value_list['insert'])
-        elif execute_query_type == ExecuteQueryType.UPDATE:
-            holder_value_list = tuple(self.__holder_value_list['update']) + tuple(self.__holder_value_list['where'])
-
-        self.__last_query = query
-        self.__last_parameters = holder_value_list
-
-        if holder_value_list is None:
-            cur.execute(query)
-        else:
-            cur.execute(query, holder_value_list)
-            
-        self.__holder_value_list['where'] = []
-        self.__holder_value_list['insert'] = []
-        self.__holder_value_list['update'] = []
-
-        retVal = None
-        if execute_query_type == ExecuteQueryType.SELECT:
-            retVal = cur.fetchall()
-        elif execute_query_type == ExecuteQueryType.COUNT:
-            rows = cur.fetchall()
-            retVal = int(rows[0][0])
-
-        if self.__enable_transaction:
-            cur.close()
-            del cur
-        else:
-            cur.close()
-            conn.close()
-            del cur
-            del conn
-        
-        return retVal
+    def find_records(self, is_dict_cursor: bool = False) -> Any:
+        return self._execute(ExecuteQueryType.SELECT, is_dict_cursor=is_dict_cursor)
 
     def raw_execute(
-            self,
-            query: str,
-            params: Optional[Sequence[Any]] = None,
-            is_dict_cursor: bool = False
-        ):
-            """
-            生SQLを直接実行する
+        self,
+        query: str,
+        params: Optional[Sequence[Any]] = None,
+        is_dict_cursor: bool = False,
+    ) -> Any:
+        conn = self._get_connection()
+        cur = self._get_cursor(conn, is_dict_cursor)
 
-            Parameters
-            ----------
-            query : str
-                実行するSQL
-            params : Optional[Sequence[Any]]
-                プレースホルダ(%s)に渡す値
-            is_dict_cursor : bool
-                True の場合 DictCursor を使用
-
-            Returns
-            -------
-            Any
-                SELECT の場合: fetchall() の結果
-                それ以外: None
-            """
-
-            conn = (
-                self._connect()
-                if not self.__enable_transaction
-                else (self.__connection or self._connect())
-            )
-
-            if self.__enable_transaction:
-                conn.autocommit(False)
-                self.__connection = conn
-            else:
-                conn.autocommit(True)
-
-            cur = self._get_cursor(conn, is_dict_cursor)
-
-            # 実行
+        try:
             if params is None:
                 cur.execute(query)
+                self._last_params = None
             else:
                 cur.execute(query, tuple(params))
+                self._last_params = tuple(params)
 
-            # last query 情報を保存
-            self.__last_query = query
-            self.__last_parameters = None if params is None else tuple(params)
+            self._last_query = query
 
-            result = None
             if query.strip().lower().startswith("select"):
-                result = cur.fetchall()
-
-            if self.__enable_transaction:
-                cur.close()
-            else:
-                cur.close()
-                conn.close()
-
-            return result
+                return cur.fetchall()
+            return None
+        finally:
+            cur.close()
+            self._close_if_not_in_tx(conn)
 
     def get_last_query(self) -> str:
-        """
-        直近で実行したクエリ文字列を取得する
-
-        Returns
-        -------
-            str
-                実行したクエリ文字列
-        """
-
-        return self.__last_query
+        return self._last_query
 
     def get_last_parameters(self) -> Union[tuple, None]:
-        """
-        直近で実行したクエリのプレースホルダーに設定された値を取得する
-
-        Returns
-        -------
-            Union[tuple, None]
-                プレースホルダーに設定した値
-        """
-
-        return self.__last_parameters
+        return self._last_params
 
     def get_last_query_info(self) -> Tuple[str, Union[tuple, None]]:
-        """
-        直近で実行したクエリ情報を取得する
+        return self._last_query, self._last_params
 
-        Returns
-        -------
-            tuple[str, Union[tuple, None]]
-                クエリ文字列とプレースホルダーに設定した値の組み合わせ
-        """
+    # ----------------------------
+    # Internal: build + execute
+    # ----------------------------
+    def _execute(self, kind: ExecuteQueryType, is_dict_cursor: Optional[bool] = None):
+        query, params = self._build_query(kind)
 
-        return self.__last_query, self.__last_parameters
+        conn = self._get_connection()
+        cur = self._get_cursor(conn, bool(is_dict_cursor))
 
-    def _query_where_build(self) -> str:
-        """
-        where句のクエリを作成する
+        self._last_query = query
+        self._last_params = tuple(params) if params else None
 
-        Returns
-        -------
-            str : query
-                作成したクエリ            
-        """
-        query = ""
+        try:
+            if params:
+                cur.execute(query, tuple(params))
+            else:
+                cur.execute(query)
 
-        if (len(self.__where_list) == 0):
-            return query
+            if kind == ExecuteQueryType.SELECT:
+                return cur.fetchall()
 
-        wheres = []
-        for i, where in enumerate(self.__where_list):
+            if kind == ExecuteQueryType.COUNT:
+                rows = cur.fetchall()
+                return int(rows[0][0])
 
-            where_condition = self.__where_condition_list[i]
-            for column, value in where.items():
-                condition = where_condition[column]
+            return None
+        finally:
+            cur.close()
+            self._close_if_not_in_tx(conn)
 
-                if 'IN' in condition:
-                    wheres.append(
-                        f"`{column}` {condition} (" + ', '.join(["%s"] * len(value)) + ")")
-                    self.__holder_value_list['where'].extend(value)
-                elif 'IS NULL' in condition or 'IS NOT NULL' in condition:
-                    wheres.append(
-                        f"`{column}` {condition}")
+    def _build_query(self, kind: ExecuteQueryType) -> Tuple[str, List[Any]]:
+        if not self._state.table:
+            raise ValueError("Table is not set. Call from_table('...') first.")
+
+        params: List[Any] = []
+
+        table_sql = self._quote_identifier(self._state.table)
+
+        if kind in (ExecuteQueryType.SELECT, ExecuteQueryType.COUNT):
+            if kind == ExecuteQueryType.COUNT:
+                select_sql = "COUNT(*)"
+            else:
+                if not self._state.selects:
+                    select_sql = "*"
                 else:
-                    # >, >=, <, <=, LIKE
-                    wheres.append(f"`{column}` {condition} %s")
-                    self.__holder_value_list['where'].append(value)
+                    select_sql = ", ".join(self._render_selects(self._state.selects))
 
-        query = ' WHERE ' + ' AND '.join(wheres)
+            query = f"SELECT {select_sql} FROM {table_sql}"
+            query += self._render_where(params)
+            query += self._render_group_by()
+            query += self._render_order_by()
+            self._state.reset()
+            return query, params
 
-        return query
-    
-    def _query_group_by_build(self) -> str:
-        """
-        group by句のクエリを作成する
+        if kind == ExecuteQueryType.INSERT:
+            if not self._state.rows:
+                raise ValueError("No data to insert. Use set()/sets() first.")
+            query = f"INSERT INTO {table_sql} " + self._render_insert(params)
+            self._state.reset()
+            return query, params
 
-        Returns
-        -------
-            str : query
-                作成したクエリ            
-        """
-        if not self.__group_by_columns:
+        if kind == ExecuteQueryType.UPDATE:
+            if not self._state.rows:
+                raise ValueError("No data to update. Use set() first.")
+            if not self._state.wheres:
+                raise ValueError("UPDATE without WHERE is blocked for safety.")
+            query = f"UPDATE {table_sql} SET " + self._render_update(params)
+            query += self._render_where(params)
+            self._state.reset()
+            return query, params
+
+        if kind == ExecuteQueryType.DELETE:
+            if not self._state.wheres:
+                raise ValueError("DELETE without WHERE is blocked for safety.")
+            query = f"DELETE FROM {table_sql}"
+            query += self._render_where(params)
+            self._state.reset()
+            return query, params
+
+        raise ValueError(f"Unsupported query type: {kind}")
+
+    def _render_selects(self, selects: List[Union[str, SqlExpr]]) -> List[str]:
+        out: List[str] = []
+        for s in selects:
+            if isinstance(s, SqlExpr):
+                out.append(s.sql)
+            else:
+                # already quoted in select()
+                out.append(str(s))
+        return out
+
+    def _render_where(self, params: List[Any]) -> str:
+        if not self._state.wheres:
             return ""
 
-        # カラム名はバッククォートで囲む（関数式が来る可能性があるなら条件分岐してもOK）
-        cols = [f"`{c}`" for c in self.__group_by_columns]
+        pieces: List[str] = []
+        for clause in self._state.wheres:
+            col = self._quote_identifier(clause.column)
+            op = clause.op.upper()
+
+            if op in ("IS NULL", "IS NOT NULL"):
+                pieces.append(f"{col} {op}")
+                continue
+
+            if op in ("IN", "NOT IN"):
+                values = list(clause.value or [])
+                if not values:
+                    # IN () is invalid; treat as false condition
+                    pieces.append("1=0" if op == "IN" else "1=1")
+                    continue
+                placeholders = ", ".join(["%s"] * len(values))
+                pieces.append(f"{col} {op} ({placeholders})")
+                params.extend(values)
+                continue
+
+            # normal binary ops (=, >, >=, <, <=, LIKE, etc.)
+            pieces.append(f"{col} {op} %s")
+            params.append(clause.value)
+
+        return " WHERE " + " AND ".join(pieces)
+
+    def _render_group_by(self) -> str:
+        if not self._state.group_by:
+            return ""
+        cols: List[str] = []
+        for c in self._state.group_by:
+            if isinstance(c, SqlExpr):
+                cols.append(c.sql)
+            else:
+                cols.append(self._quote_identifier(str(c)))
         return " GROUP BY " + ", ".join(cols)
 
-    def _query_insert_build(self) -> str:
-        """
-        Insert句のクエリを作成する
+    def _render_order_by(self) -> str:
+        if not self._state.order_by:
+            return ""
+        cols: List[str] = []
+        for c, direction in self._state.order_by:
+            if isinstance(c, SqlExpr):
+                cols.append(f"{c.sql} {direction}")
+            else:
+                cols.append(f"{self._quote_identifier(str(c))} {direction}")
+        return " ORDER BY " + ", ".join(cols)
 
-        Returns
-        -------
-            str : query
-                作成したクエリ            
-        """
-        query = ""
+    def _render_insert(self, params: List[Any]) -> str:
+        # Use keys of first row as column order; require all rows have same keys
+        rows = self._state.rows
+        cols = list(rows[0].keys())
+        if not cols:
+            raise ValueError("Insert row has no columns.")
 
-        insert_or_update_list = self.__insert_or_update_list
+        for r in rows:
+            if list(r.keys()) != cols:
+                raise ValueError("All rows in sets() must have the same columns and order.")
 
-        columns = [f"`{miexed}`" for miexed in insert_or_update_list[0]]
+        col_sql = ", ".join(self._quote_identifier(c) for c in cols)
 
-        query += f"({', '.join(columns)}) VALUES"
+        value_groups: List[str] = []
+        for r in rows:
+            values = [r[c] for c in cols]
+            params.extend(values)
+            value_groups.append("(" + ", ".join(["%s"] * len(values)) + ")")
 
-        multiple_insert_list = []
-        for insert_or_update in insert_or_update_list:
-            insert_list = insert_or_update.values()
-            self.__holder_value_list['insert'].extend(insert_list)
-            multiple_insert_list.append("(" + ', '.join(["%s"] * len(insert_list)) + ")")
-        query += ",".join(multiple_insert_list)
+        return f"({col_sql}) VALUES " + ", ".join(value_groups)
 
-        return query
+    def _render_update(self, params: List[Any]) -> str:
+        row = self._state.rows[0]
+        if not row:
+            raise ValueError("Update payload is empty.")
+        assigns: List[str] = []
+        for col, val in row.items():
+            assigns.append(f"{self._quote_identifier(col)} = %s")
+            params.append(val)
+        return ", ".join(assigns)
 
-    def _query_update_build(self) -> str:
-        """
-        Update句のクエリを作成する
+    def _add_where(self, column: str, op: str, value: Any) -> "SqlManager":
+        self._state.wheres.append(_WhereClause(column=column, op=op, value=value))
+        return self
 
-        Returns
-        -------
-            str : query
-                作成したクエリ            
-        """
-        query = ""
+    # ----------------------------
+    # Connection / cursor
+    # ----------------------------
+    def _get_connection(self):
+        if self._in_tx:
+            if self._tx_conn is None:
+                self._tx_conn = self._connect(autocommit=False)
+            return self._tx_conn
+        return self._connect(autocommit=True)
 
-        update_list = []
+    def _close_if_not_in_tx(self, conn) -> None:
+        if not self._in_tx:
+            conn.close()
 
-        # updateで複数行のデータをそれぞれ更新することはできないので、
-        # 配列データが格納されているが１つしか存在しない
-        insert_or_update = self.__insert_or_update_list[0]
-
-        for column, value in insert_or_update.items():
-            update_list.append(f"`{column}` = %s")
-            self.__holder_value_list['update'].append(value)
-
-        query += ", ".join(update_list)
-
-        return query
-
-    def _query_order_build(self) -> str:
-        """
-        Order句のクエリを作成する
-
-        Returns
-        -------
-            query: str
-                order句のクエリ
-        """
-        if len(self.__order_by_list) == 0:
-            return ''
-        
-        query = ''
-        for order_by in self.__order_by_list:
-            order = order_by['order']
-            columns = order_by['columns']
-
-            query += ' ORDER BY ' + ','.join(columns) + f" {order} "
-        
-        return query
-
-    def _query_build(self, execute_query_type: ExecuteQueryType) -> str:
-        """
-        クエリを組み立てる
-
-        Returns
-        -------
-            str : query
-                作成したクエリ          
-        """
-
-        query = ""
-
-        if execute_query_type == ExecuteQueryType.SELECT:
-            if len(self.__select) == 0:
-                self.__select.append("*")
-            query = "SELECT {} FROM {}".format(
-                ",".join(self.__select), self.__table)
-            query += self._query_where_build()
-            query += self._query_group_by_build()
-            query += self._query_order_build()
-
-        elif execute_query_type == ExecuteQueryType.INSERT:
-            query = f"INSERT INTO {self.__table}"
-            query += self._query_insert_build()
-    
-        elif execute_query_type == ExecuteQueryType.DELETE:
-            query = f"DELETE FROM {self.__table}"
-            query += self._query_where_build()
-
-        elif execute_query_type == ExecuteQueryType.UPDATE:
-            query = f"UPDATE {self.__table} SET "
-            query += self._query_update_build()
-            query += self._query_where_build()
-        
-        elif execute_query_type == ExecuteQueryType.COUNT:
-            query = f"SELECT COUNT(*) FROM {self.__table} "
-            query += self._query_where_build()
-            query += self._query_group_by_build()
-            query += self._query_order_build()
-
-        else:
-            print(
-                f"指定したクエリタイプは対応されていません。 base_query_type = {type(self.__table)}")
-
-        self.__where_list = []
-        self.__where_condition_list = []
-        self.__select = []
-        self.__insert_or_update_list = []
-        self.__order_by_list = []
-        self.__group_by_columns = []
-
-        return query
-
-    def _connect(self):
-        """"
-        MySQLに接続する
-
-        Returns
-        -------
-            MySQLdb : MySQLdb.connect
-                MySQLdbインスタンス
-        """
-        charset = self.__settings.get("charset", "utf8mb4")
-        autocommit = self.__settings.get("autocommit", True)
-
-        connection_options = {
-            "user": self.__settings["user"],
-            "passwd": self.__settings["passwd"],
-            "host": self.__settings["host"],
-            "db": self.__settings["db"],
-            "charset": charset,
+    def _connect(self, autocommit: bool):
+        options = {
+            "user": self._settings.user,
+            "passwd": self._settings.passwd,
+            "host": self._settings.host,
+            "db": self._settings.db,
+            "charset": self._settings.charset,
             "autocommit": autocommit,
         }
+        return self._driver_module.connect(**options)
 
-        return self.__driver_module.connect(**connection_options)
+    def _get_cursor(self, conn, is_dict_cursor: bool):
+        if is_dict_cursor:
+            # MySQLdb and pymysql both expose cursors.DictCursor in similar shape
+            return conn.cursor(self._driver_module.cursors.DictCursor)
+        return conn.cursor()
 
-    def __load_driver(self, driver: Optional[str]) -> ModuleType:
-        """
-        利用するドライバーを読み込む。
-
-        指定がある場合は該当ドライバーを読み込み、失敗した場合は例外を送出する。
-        指定がない場合は環境で利用可能なドライバーを優先順位に従って選択する。
-        """
-
+    # ----------------------------
+    # Driver loading
+    # ----------------------------
+    def _load_driver(self, driver: Optional[str]) -> ModuleType:
         if driver is not None:
-            normalized_driver = driver.lower()
-            module_name = self._DRIVER_MODULES.get(normalized_driver)
+            normalized = driver.lower()
+            module_name = self._DRIVER_MODULES.get(normalized)
             if module_name is None:
                 raise ValueError(f"Unsupported driver: {driver}")
-
             if util.find_spec(module_name) is None:
                 raise ImportError(f"Driver '{driver}' could not be loaded.")
-
             return import_module(module_name)
 
+        # Auto-pick in priority order
         for candidate in ("pymysql", "mysqldb"):
             module_name = self._DRIVER_MODULES[candidate]
             if util.find_spec(module_name) is None:
@@ -934,68 +582,16 @@ class SqlManager:
 
         raise ImportError("No supported MySQL driver is available in the current environment.")
 
-    def _add_wheres(self, column: str, value: Any, condition: str) -> None:
+    # ----------------------------
+    # Identifier safety
+    # ----------------------------
+    def _quote_identifier(self, ident: str) -> str:
         """
-        whereリストに値、カラム、条件を追加する
-
-        Parameters
-        ---------
-            str: columns
-                カラム名
-            Any: value
-                値
-            str: condition
-                条件
+        Quote a MySQL identifier with backticks after validation.
+        Allows dotted identifiers like "schema.table" or "table.column".
         """
-        self.__where_list.append({column: value})
-        self.__where_condition_list.append({column: condition})
-
-    def _is_use_aggregate_functions(self, column: str) -> bool:
-        """
-        集約関数が利用されているかを判別する
-
-        Paramters
-        ---------
-            column: str 
-                select関数で使用するカラム名
-
-        Returns
-        -------
-            is_mathc: bool
-                利用しているかどうか
-        """
-        pattern_list = [
-            'AVG',
-            'BIT_AND',
-            'BIT_OR',
-            'BIT_XOR',
-            'COUNT',
-            'GROUP_CONCAT',
-            'JSON_ARRAYAGG',
-            'JSON_OBJECTAGG',
-            'MAX',
-            'MIN',
-            'STD',
-            'STDDEV',
-            'STDDEV_POP',
-            'STDDEV_POP',
-            'SUM',
-            'VAR_POP',
-            'VAR_SAMP',
-            'VARIANCE'
-        ]
-
-        is_match = False
-        for pattern in pattern_list:
-            pattern = rf"[a-zA-Z0-9_]?{pattern}\(.*\)[a-zA-Z0-9_]?"
-            if re.search(pattern, column, re.IGNORECASE) != None:
-                is_match = True
-                break
-
-        return is_match
-
-
-    def _get_cursor(self, conn, is_dict_cursor):
-        if is_dict_cursor:
-            return conn.cursor(self.__driver_module.cursors.DictCursor)
-        return conn.cursor()
+        parts = ident.split(".")
+        for p in parts:
+            if not self._IDENT_RE.match(p):
+                raise ValueError(f"Invalid identifier: {ident!r}")
+        return ".".join(f"`{p}`" for p in parts)
