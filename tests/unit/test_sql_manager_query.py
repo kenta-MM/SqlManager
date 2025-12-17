@@ -28,7 +28,7 @@ class TestSqlManagerQuery(unittest.TestCase):
             tuple: (SqlManagerインスタンス, モックコネクション, モックカーソル)
         """
         fake_driver = self._fake_driver_module()
-        with patch.object(SqlManager, "_load_driver", return_value=("pymysql", fake_driver)):
+        with patch.object(SqlManager, "_SqlManager__load_driver", return_value=("pymysql", fake_driver)):
             manager = SqlManager({
                 'user': 'user',
                 'passwd': 'passwd',
