@@ -334,6 +334,35 @@ class TestSqlManagerQuery(unittest.TestCase):
 
         self.cursor_mock.execute.assert_not_called()
 
+    def test_select_builds_query_with_group_by_and_having(self):
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users") \
+            .select("name") \
+            .select(SqlExpr("COUNT(*)")) \
+            .group_by("name") \
+            .having_gt(SqlExpr("COUNT(*)"), 1) \
+            .find_records()
+
+        expected_query = (
+            "SELECT `name`, COUNT(*) FROM `users` "
+            "GROUP BY `name` HAVING COUNT(*) > %s"
+        )
+        expected_params = (1,)
+
+        self.assert_last_query(expected_query, expected_params)
+
+    def test_having_without_group_by_is_blocked(self):
+        self.cursor_mock.execute.reset_mock()
+
+        self.sql_manager.from_table("users").select("name")
+        with self.assertRaises(ValueError):
+            self.sql_manager.having_gt(SqlExpr("COUNT(*)"), 1).find_records()
+
+        self.cursor_mock.execute.assert_not_called()
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,7 @@ class QueryState:
     table: Optional[str] = None
     selects: List[Union[str, SqlExpr]] = field(default_factory=list)
     wheres: List[_WhereClause] = field(default_factory=list)
+    havings: List[_WhereClause] = field(default_factory=list)
     group_by: List[Union[str, SqlExpr]] = field(default_factory=list)
     order_by: List[Tuple[Union[str, SqlExpr], str]] = field(default_factory=list)
     joins: List[_JoinClause] = field(default_factory=list)
@@ -85,6 +86,7 @@ class QueryState:
         self.table = None
         self.selects.clear()
         self.wheres.clear()
+        self.havings.clear()
         self.group_by.clear()
         self.order_by.clear()
         self.joins.clear()
@@ -250,6 +252,22 @@ class SqlManager:
 
     def where_is_not_null(self, column: str) -> "SqlManager":
         return self._add_where(column, "IS NOT NULL", None)
+        
+    # Having variants
+    def having(self, expr: Union[str, SqlExpr], value: Any) -> "SqlManager":
+        return self._add_having(expr, "=", value)
+
+    def having_gt(self, expr: Union[str, SqlExpr], value: Any) -> "SqlManager":
+        return self._add_having(expr, ">", value)
+
+    def having_gte(self, expr: Union[str, SqlExpr], value: Any) -> "SqlManager":
+        return self._add_having(expr, ">=", value)
+
+    def having_lt(self, expr: Union[str, SqlExpr], value: Any) -> "SqlManager":
+        return self._add_having(expr, "<", value)
+
+    def having_lte(self, expr: Union[str, SqlExpr], value: Any) -> "SqlManager":
+        return self._add_having(expr, "<=", value)
 
     def select(self, column: Union[str, SqlExpr], as_column: Optional[str] = None) -> "SqlManager":
         if isinstance(column, SqlExpr):
@@ -434,6 +452,7 @@ class SqlManager:
             query += self._render_joins()
             query += self._render_where(params)
             query += self._render_group_by()
+            query += self._render_having(params)
             query += self._render_order_by()
             self._state.reset()
             return query, params
@@ -504,7 +523,27 @@ class SqlManager:
             params.append(clause.value)
 
         return " WHERE " + " AND ".join(pieces)
-    
+
+    def _render_having(self, params: List[Any]) -> str:
+        if not self._state.havings:
+            return ""
+
+        if not self._state.group_by:
+            raise ValueError("HAVING requires GROUP BY.")
+
+        pieces: List[str] = []
+        for clause in self._state.havings:
+            if isinstance(clause.column, SqlExpr):
+                col_sql = clause.column.sql
+            else:
+                # HAVING は集計式を想定するためクォートしない
+                col_sql = str(clause.column)
+
+            pieces.append(f"{col_sql} {clause.op} %s")
+            params.append(clause.value)
+
+        return " HAVING " + " AND ".join(pieces)
+
     def _render_joins(self) -> str:
         if not self._state.joins:
             return ""
@@ -574,6 +613,12 @@ class SqlManager:
 
     def _add_where(self, column: str, op: str, value: Any) -> "SqlManager":
         self._state.wheres.append(_WhereClause(column=column, op=op, value=value))
+        return self
+    
+    def _add_having(self, expr: Union[str, SqlExpr], op: str, value: Any) -> "SqlManager":
+        self._state.havings.append(
+            _WhereClause(column=expr, op=op, value=value)
+        )
         return self
 
     # ----------------------------
