@@ -256,5 +256,84 @@ class TestSqlManagerQuery(unittest.TestCase):
         self.cursor_mock.execute.assert_not_called()
 
 
+    # ----------------------------
+    # JOIN
+    # ----------------------------
+    def test_select_builds_query_with_inner_join(self):
+        """
+        INNER JOIN が FROM の直後に入り、ON 句が付くことを確認する。
+        JOINテストなので、AS / DictCursor / ORDER BY などは使わない。
+        """
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users") \
+            .inner_join("orders", "users.id = orders.user_id") \
+            .select("users.id") \
+            .select("orders.id") \
+            .find_records()
+
+        expected_query = (
+            "SELECT `users`.`id`, `orders`.`id` FROM `users` "
+            "INNER JOIN `orders` ON users.id = orders.user_id"
+        )
+        self.assert_last_query(expected_query, None)
+
+    def test_select_builds_query_with_left_join(self):
+        """
+        LEFT JOIN が生成されることを確認する。
+        JOINテストなので、selectの別名や並び替えなどの仕様には依存しない。
+        """
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users") \
+            .left_join("orders", "users.id = orders.user_id") \
+            .select("users.id") \
+            .select("orders.id") \
+            .find_records()
+
+        expected_query = (
+            "SELECT `users`.`id`, `orders`.`id` FROM `users` "
+            "LEFT JOIN `orders` ON users.id = orders.user_id"
+        )
+        self.assert_last_query(expected_query, None)
+
+    def test_select_builds_query_with_cross_join(self):
+        """
+        CROSS JOIN が生成され、ON が付かないことを確認する。
+        直積の行数などはDBが無いので検証しない（クエリ文字列のみ）。
+        """
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users") \
+            .cross_join("orders") \
+            .select("users.id") \
+            .select("orders.id") \
+            .find_records()
+
+        expected_query = (
+            "SELECT `users`.`id`, `orders`.`id` FROM `users` "
+            "CROSS JOIN `orders`"
+        )
+        self.assert_last_query(expected_query, None)
+
+    def test_join_identifier_validation_invalid_table_raises(self):
+        """
+        JOIN でも識別子検証が効いていることを確認する。
+        ただし検証はクエリ生成（実行）時に行われるため、find_records() で ValueError を確認する。
+        """
+        self.cursor_mock.execute.reset_mock()
+
+        with self.assertRaises(ValueError):
+            self.sql_manager.from_table("users") \
+                .inner_join("orders;DROP", "users.id = orders.user_id") \
+                .select("users.id") \
+                .find_records()
+
+        self.cursor_mock.execute.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
