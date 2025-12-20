@@ -569,6 +569,39 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
 
         self.assertEqual(actual_pairs, expected_pairs)
 
+    def test_having_filters_grouped_rows(self):
+        """
+        GROUP BY + HAVING により、集計結果で絞り込めることを確認する。
+        （AS など別機能への依存を避け、tuple で検証する）
+        """
+        self.manager.from_table("test_items").sets([
+            {"name": "a", "score": 10},
+            {"name": "a", "score": 20},
+            {"name": "b", "score": 30},
+        ]).create()
+
+        rows = (
+            self.manager
+            .from_table("test_items")
+            .select("name")
+            .select(SqlExpr("COUNT(*)"))
+            .group_by("name")
+            .having_gt(SqlExpr("COUNT(*)"), 1)
+            .find_records()
+        )
+
+        # HAVING COUNT(*) > 1 なので "a" だけが残り、件数は2
+        self.assertEqual(set(rows), {("a", 2)})
+
+    def test_having_without_group_by_is_blocked(self):
+        self.manager.from_table("test_items").set("name", "x").set("score", 1).create()
+
+        with self.assertRaises(ValueError):
+            self.manager.from_table("test_items") \
+                .select("name") \
+                .having_gt(SqlExpr("COUNT(*)"), 1) \
+                .find_records()
+
 class TestSqlManagerMySQL_PyMySQL(TestSqlManagerMySQL_AllPublic):
     DRIVER = "pymysql"
 
