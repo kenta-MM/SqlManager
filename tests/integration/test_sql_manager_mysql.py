@@ -52,11 +52,33 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
             """
         )
 
+        cls.manager.raw_execute(
+            """
+            CREATE TABLE IF NOT EXISTS test_users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+
+        cls.manager.raw_execute(
+            """
+            CREATE TABLE IF NOT EXISTS test_orders (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NULL,
+                item VARCHAR(255) NOT NULL,
+                INDEX idx_user_id (user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+
     def setUp(self):
         """
         各テストは常にクリーンな状態で開始する。
         """
         self.manager.raw_execute("TRUNCATE TABLE test_items")
+        self.manager.raw_execute("TRUNCATE TABLE test_orders")
+        self.manager.raw_execute("TRUNCATE TABLE test_users")
 
     # ---- 基本: from_table / set / create / find_records ----
     def test_from_table_set_create_find_records(self):
@@ -433,6 +455,119 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         q2 = self.manager.get_last_query()
         self.assertTrue(q2.upper().startswith("SELECT"))
 
+    # ---- join ----
+    def test_inner_join(self):
+        """
+        inner_join() により一致する行のみ取得できることを確認する。
+        """
+        self.manager.from_table("test_users").sets([
+            {"name": "u1"},
+            {"name": "u2"},
+        ]).create()
+
+        # u1 のみ注文がある
+        u1_id = self.manager.from_table("test_users").select("id").where("name", "u1").find_records()[0][0]
+        self.manager.from_table("test_orders").sets([
+            {"user_id": u1_id, "item": "apple"},
+        ]).create()
+
+        rows = (
+            self.manager
+            .from_table("test_users")
+            .inner_join("test_orders", "test_users.id = test_orders.user_id")
+            .select("test_users.name", "user_name")
+            .select("test_orders.item", "order_item")
+            .order_by_asc(["test_users.id"])
+            .find_records(is_dict_cursor=True)
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user_name"], "u1")
+        self.assertEqual(rows[0]["order_item"], "apple")
+
+    def test_left_join_includes_unmatched(self):
+        """
+        left_join() により左側テーブルの全行が取得でき、
+        右側が無い場合は NULL になることを確認する。
+        """
+        self.manager.from_table("test_users").sets([
+            {"name": "u1"},
+            {"name": "u2"},
+        ]).create()
+
+        u1_id = self.manager.from_table("test_users").select("id").where("name", "u1").find_records()[0][0]
+        self.manager.from_table("test_orders").sets([
+            {"user_id": u1_id, "item": "apple"},
+        ]).create()
+
+        rows = (
+            self.manager
+            .from_table("test_users")
+            .left_join("test_orders", "test_users.id = test_orders.user_id")
+            .select("test_users.name", "user_name")
+            .select("test_orders.item", "order_item")
+            .order_by_asc(["test_users.id"])
+            .find_records(is_dict_cursor=True)
+        )
+
+        # u1 は item が入り、u2 は NULL
+        self.assertEqual([r["user_name"] for r in rows], ["u1", "u2"])
+        self.assertEqual(rows[0]["order_item"], "apple")
+        self.assertIsNone(rows[1]["order_item"])
+
+    def test_cross_join_cartesian_product(self):
+        """
+        cross_join() により直積（行数 = 左件数 * 右件数）になり、
+        すべての組み合わせが取得できることを確認する。
+        """
+        self.manager.from_table("test_users").sets([
+            {"name": "u1"},
+            {"name": "u2"},
+        ]).create()
+
+        self.manager.from_table("test_orders").sets([
+            {"user_id": None, "item": "a"},
+            {"user_id": None, "item": "b"},
+            {"user_id": None, "item": "c"},
+        ]).create()
+
+        rows = (
+            self.manager
+            .from_table("test_users")
+            .cross_join("test_orders")
+            .select("test_users.id")
+            .select("test_orders.id")
+            .find_records()
+        )
+
+        # 件数チェック（2 × 3 = 6）
+        self.assertEqual(len(rows), 6)
+
+        # ---- 中身のチェック ----
+        # users.id と orders.id をそれぞれ取得
+        user_ids = {
+            r[0] for r in self.manager
+                .from_table("test_users")
+                .select("id")
+                .find_records()
+        }
+        order_ids = {
+            r[0] for r in self.manager
+                .from_table("test_orders")
+                .select("id")
+                .find_records()
+        }
+
+        # 期待される直積
+        expected_pairs = {
+            (u_id, o_id)
+            for u_id in user_ids
+            for o_id in order_ids
+        }
+
+        actual_pairs = set(rows)
+
+        self.assertEqual(actual_pairs, expected_pairs)
 
 class TestSqlManagerMySQL_PyMySQL(TestSqlManagerMySQL_AllPublic):
     DRIVER = "pymysql"

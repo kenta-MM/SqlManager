@@ -50,7 +50,17 @@ class _WhereClause:
     op: str
     value: Any = None
 
+@dataclass
+class _JoinClause:
+    """
+    JOIN句の1条件を表す内部用データクラス
 
+    ユーザーから直接参照されることは想定していない。
+    """
+    join_type: str
+    table: str
+    on: Optional[str]
+    
 @dataclass
 class QueryState:
     """
@@ -65,6 +75,8 @@ class QueryState:
     wheres: List[_WhereClause] = field(default_factory=list)
     group_by: List[Union[str, SqlExpr]] = field(default_factory=list)
     order_by: List[Tuple[Union[str, SqlExpr], str]] = field(default_factory=list)
+    joins: List[_JoinClause] = field(default_factory=list)
+
     # insert/update payload
     rows: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -75,6 +87,7 @@ class QueryState:
         self.wheres.clear()
         self.group_by.clear()
         self.order_by.clear()
+        self.joins.clear()
         self.rows.clear()
 
 
@@ -248,6 +261,25 @@ class SqlManager:
         self._state.selects.append(SqlExpr(sel) if isinstance(column, SqlExpr) else sel)
         return self
 
+    # Join variants
+    def inner_join(self, table: str, on: str) -> "SqlManager":
+        self._state.joins.append(
+            _JoinClause("INNER", table, on)
+        )
+        return self
+
+    def left_join(self, table: str, on: str) -> "SqlManager":
+        self._state.joins.append(
+            _JoinClause("LEFT", table, on)
+        )
+        return self
+
+    def cross_join(self, table: str) -> "SqlManager":
+        self._state.joins.append(
+            _JoinClause("CROSS", table, None)
+        )
+        return self
+
     # Insert/Update payload
     def set(self, column: Union[str, dict], value: Any = None) -> "SqlManager":
         """
@@ -399,6 +431,7 @@ class SqlManager:
                     select_sql = ", ".join(self._render_selects(self._state.selects))
 
             query = f"SELECT {select_sql} FROM {table_sql}"
+            query += self._render_joins()
             query += self._render_where(params)
             query += self._render_group_by()
             query += self._render_order_by()
@@ -471,6 +504,20 @@ class SqlManager:
             params.append(clause.value)
 
         return " WHERE " + " AND ".join(pieces)
+    
+    def _render_joins(self) -> str:
+        if not self._state.joins:
+            return ""
+        
+        parts = []
+        for j in self._state.joins:
+            table_sql = self._quote_identifier(j.table)
+            if j.join_type == "CROSS":
+                parts.append(f"CROSS JOIN {table_sql}")
+            else:
+                parts.append(f"{j.join_type} JOIN {table_sql} ON {j.on}")
+
+        return " " + " ".join(parts)
 
     def _render_group_by(self) -> str:
         if not self._state.group_by:
