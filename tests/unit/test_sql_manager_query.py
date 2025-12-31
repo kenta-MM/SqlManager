@@ -190,6 +190,34 @@ class TestSqlManagerQuery(unittest.TestCase):
         self.assertEqual(5, count)
         self.assert_last_query(expected_query, expected_params)
 
+    def test_select_builds_query_with_limit_and_offset(self):
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users") \
+            .select("name") \
+            .where("status", "active") \
+            .order_by_asc(["id"]) \
+            .limit(10, offset=5) \
+            .find_records()
+
+        expected_query = (
+            "SELECT `name` FROM `users` "
+            "WHERE `status` = %s ORDER BY `id` ASC LIMIT %s OFFSET %s"
+        )
+        expected_params = ("active", 10, 5)
+        self.assert_last_query(expected_query, expected_params)
+
+    def test_limit_without_offset(self):
+        self.cursor_mock.execute.reset_mock()
+        self.cursor_mock.fetchall.return_value = ()
+
+        self.sql_manager.from_table("users").select("id").limit(3).find_records()
+
+        expected_query = "SELECT `id` FROM `users` LIMIT %s"
+        expected_params = (3,)
+        self.assert_last_query(expected_query, expected_params)
+
     def test_select_handles_null_checks(self):
         # --- IS NULL ---
         self.cursor_mock.execute.reset_mock()
@@ -255,6 +283,13 @@ class TestSqlManagerQuery(unittest.TestCase):
 
         self.cursor_mock.execute.assert_not_called()
 
+    def test_limit_rejects_negative_values(self):
+        self.cursor_mock.execute.reset_mock()
+
+        with self.assertRaises(ValueError):
+            self.sql_manager.from_table("users").limit(-1)
+
+        self.cursor_mock.execute.assert_not_called()
 
     # ----------------------------
     # JOIN
