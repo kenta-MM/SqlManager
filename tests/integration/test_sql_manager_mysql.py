@@ -303,6 +303,34 @@ class TestSqlManagerMySQL_AllPublic(unittest.TestCase):
         )
         self.assertEqual(rows[0]["score"], 2)
 
+    def test_limit_and_offset(self):
+        """
+        limit() が取得件数を制限し、offset 指定も反映されることを確認する。
+        """
+        self.manager.from_table("test_items").sets([
+            {"name": "a", "score": 1},
+            {"name": "b", "score": 2},
+            {"name": "c", "score": 3},
+        ]).create()
+
+        rows_limited = (
+            self.manager
+            .from_table("test_items")
+            .order_by_asc(["id"])
+            .limit(2)
+            .find_records(is_dict_cursor=True)
+        )
+        self.assertEqual([r["name"] for r in rows_limited], ["a", "b"])
+
+        rows_offset = (
+            self.manager
+            .from_table("test_items")
+            .order_by_asc(["id"])
+            .limit(1, offset=1)
+            .find_records(is_dict_cursor=True)
+        )
+        self.assertEqual([r["name"] for r in rows_offset], ["b"])
+
     # ---- update / delete / count ----
     def test_update(self):
         """

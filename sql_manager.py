@@ -77,6 +77,8 @@ class QueryState:
     group_by: List[Union[str, SqlExpr]] = field(default_factory=list)
     order_by: List[Tuple[Union[str, SqlExpr], str]] = field(default_factory=list)
     joins: List[_JoinClause] = field(default_factory=list)
+    limit: Optional[int] = None
+    offset: Optional[int] = None
 
     # insert/update payload
     rows: List[Dict[str, Any]] = field(default_factory=list)
@@ -91,6 +93,8 @@ class QueryState:
         self.order_by.clear()
         self.joins.clear()
         self.rows.clear()
+        self.limit = None
+        self.offset = None
 
 
 @dataclass(frozen=True)
@@ -348,6 +352,16 @@ class SqlManager:
             self._state.order_by.append((c if isinstance(c, SqlExpr) else str(c), "DESC"))
         return self
 
+    def limit(self, limit: int, offset: Optional[int] = None) -> "SqlManager":
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise ValueError("limit must be a non-negative integer.")
+        if offset is not None:
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ValueError("offset must be a non-negative integer when provided.")
+        self._state.limit = limit
+        self._state.offset = offset
+        return self
+
     # ----------------------------
     # Execution API
     # ----------------------------
@@ -454,6 +468,8 @@ class SqlManager:
             query += self._render_group_by()
             query += self._render_having(params)
             query += self._render_order_by()
+            if kind == ExecuteQueryType.SELECT:
+                query += self._render_limit(params)
             self._state.reset()
             return query, params
 
@@ -579,6 +595,17 @@ class SqlManager:
             else:
                 cols.append(f"{self._quote_identifier(str(c))} {direction}")
         return " ORDER BY " + ", ".join(cols)
+
+    def _render_limit(self, params: List[Any]) -> str:
+        if self._state.limit is None:
+            return ""
+
+        params.append(self._state.limit)
+        if self._state.offset is None:
+            return " LIMIT %s"
+
+        params.append(self._state.offset)
+        return " LIMIT %s OFFSET %s"
 
     def _render_insert(self, params: List[Any]) -> str:
         # Use keys of first row as column order; require all rows have same keys
